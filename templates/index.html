@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Veggen Management</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        .status-blocked { color: #d81b60; font-weight: bold; }
+        .status-online { color: #2e7d32; font-weight: bold; }
+        .loading { display: none; }
+        [aria-busy="true"] .loading { display: inline-block; }
+    </style>
+</head>
+<body>
+    <nav class="container">
+        <ul>
+            <li><strong>Veggen</strong></li>
+        </ul>
+        <ul>
+            <li><a href="/logout" class="secondary">Logout</a></li>
+        </ul>
+    </nav>
+    <main class="container">
+        <hgroup>
+            <h1>Devices</h1>
+            <p>Manage internet access for selected devices on OpenWrt (10.11.12.1)</p>
+        </hgroup>
+
+        <section id="device-list" aria-busy="true">
+            <div class="loading">Loading devices...</div>
+            <table role="grid">
+                <thead>
+                    <tr>
+                        <th>Kid / Device</th>
+                        <th>MAC Address</th>
+                        <th>IP Address</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="devices-tbody">
+                    <!-- Devices will be loaded here -->
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <script>
+        async function fetchDevices() {
+            const section = document.getElementById('device-list');
+            section.setAttribute('aria-busy', 'true');
+            
+            try {
+                const response = await fetch('/api/devices');
+                const devices = await response.json();
+                const tbody = document.getElementById('devices-tbody');
+                tbody.innerHTML = '';
+
+                if (devices.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5">No devices found with the configured prefix.</td></tr>';
+                }
+
+                devices.forEach(dev => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><strong>${dev.name}</strong></td>
+                        <td><code>${dev.mac}</code></td>
+                        <td>${dev.ip}</td>
+                        <td class="${dev.blocked ? 'status-blocked' : 'status-online'}">
+                            ${dev.blocked ? 'BLOCKED' : 'ONLINE'}
+                        </td>
+                        <td>
+                            <button class="${dev.blocked ? 'outline' : ''}" 
+                                onclick="toggleDevice('${dev.mac}', '${dev.name}', ${dev.blocked})">
+                                ${dev.blocked ? 'Unblock' : 'Block'}
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (error) {
+                console.error('Error fetching devices:', error);
+            } finally {
+                section.setAttribute('aria-busy', 'false');
+            }
+        }
+
+        async function toggleDevice(mac, name, isBlocked) {
+            const action = isBlocked ? 'unblock' : 'block';
+            if (!confirm(`Are you sure you want to ${action} ${name}?`)) return;
+
+            try {
+                const response = await fetch('/api/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mac, name, action })
+                });
+                
+                if (response.ok) {
+                    await fetchDevices();
+                } else {
+                    alert('Failed to update device status.');
+                }
+            } catch (error) {
+                console.error('Error toggling device:', error);
+            }
+        }
+
+        // Initial load
+        fetchDevices();
+    </script>
+</body>
+</html>

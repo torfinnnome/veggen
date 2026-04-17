@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Veggen</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        article { width: 100%; max-width: 400px; }
+        .error { color: #d81b60; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+    <article>
+        <header>
+            <strong>Veggen Login</strong>
+        </header>
+        <form method="POST">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" placeholder="Enter password" required autofocus>
+            {% if error %}
+            <p class="error">{{ error }}</p>
+            {% endif %}
+            <button type="submit">Login</button>
+        </form>
+    </article>
+</body>
+</html>
