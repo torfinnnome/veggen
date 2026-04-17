@@ -110,14 +110,21 @@ def api_devices():
 @app.route("/api/toggle", methods=["POST"])
 @login_required
 def toggle_access():
-    data = request.json
+    data = request.json or {}
     mac = data.get("mac")
     action = data.get("action")
     
     if not mac or not action:
         return jsonify({"error": "Missing data"}), 400
+
+    if action not in {"block", "unblock"}:
+        return jsonify({"error": "Invalid action"}), 400
+
+    mac_norm = mac.strip().lower()
+    if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac_norm):
+        return jsonify({"error": "Invalid MAC address"}), 400
     
-    rule_name = f"block_{sanitize_mac(mac)}"
+    rule_name = f"block_{sanitize_mac(mac_norm)}"
     
     if action == "block":
         # Prepend sudo to each privileged command
@@ -125,14 +132,14 @@ def toggle_access():
             f"sudo uci add firewall rule; "
             f"sudo uci set firewall.@rule[-1].name={rule_name}; "
             f"sudo uci set firewall.@rule[-1].src=lan; "
-            f"sudo uci set firewall.@rule[-1].src_mac={mac}; "
+            f"sudo uci set firewall.@rule[-1].src_mac={mac_norm}; "
             f"sudo uci set firewall.@rule[-1].target=DROP; "
             f"sudo uci set firewall.@rule[-1].family=any; "
             f"sudo uci set firewall.@rule[-1].enabled=1; "
             f"sudo uci commit firewall; "
             f"sudo /etc/init.d/firewall reload; "
-            f"sudo nft insert rule inet fw4 forward ether saddr {mac.lower()} counter drop; "
-            f"sudo nft insert rule inet fw4 input ether saddr {mac.lower()} counter drop"
+            f"sudo nft insert rule inet fw4 forward ether saddr {mac_norm} counter drop; "
+            f"sudo nft insert rule inet fw4 input ether saddr {mac_norm} counter drop"
         )
     else:
         # Loop logic runs as 'veggen', commands inside use sudo
@@ -140,8 +147,8 @@ def toggle_access():
             f"for s in $(sudo uci show firewall | grep {rule_name} | cut -d. -f2 | cut -d= -f1 | uniq); do sudo uci delete firewall.$s; done; "
             "sudo uci commit firewall; "
             "sudo /etc/init.d/firewall reload; "
-            f"for h in $(sudo nft list chain inet fw4 forward | grep -i {mac.lower()} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 forward handle $h; done; "
-            f"for h in $(sudo nft list chain inet fw4 input | grep -i {mac.lower()} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 input handle $h; done"
+            f"for h in $(sudo nft list chain inet fw4 forward | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 forward handle $h; done; "
+            f"for h in $(sudo nft list chain inet fw4 input | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 input handle $h; done"
         )
     
     run_ssh_command(cmd)
