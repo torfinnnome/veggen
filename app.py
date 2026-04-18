@@ -70,11 +70,13 @@ def get_devices():
                 is_blocked = (status_output == "blocked")
                 
                 parts = name.split("-")
-                display_name = "-".join(parts[1:]) if len(parts) > 1 else name
+                kid = parts[1] if len(parts) > 1 else "Unknown"
+                device_name = "-".join(parts[2:]) if len(parts) > 2 else "Device"
                 
                 ctrl_devices.append({
                     "id": section,
-                    "name": display_name,
+                    "kid": kid,
+                    "device_name": device_name,
                     "full_name": name,
                     "mac": mac,
                     "ip": data.get("ip", "Unknown"),
@@ -111,47 +113,53 @@ def api_devices():
 @login_required
 def toggle_access():
     data = request.json or {}
-    mac = data.get("mac")
+    macs = data.get("macs", [])
+    if "mac" in data:
+        macs.append(data["mac"])
+    
     action = data.get("action")
     
-    if not mac or not action:
+    if not macs or not action:
         return jsonify({"error": "Missing data"}), 400
 
     if action not in {"block", "unblock"}:
         return jsonify({"error": "Invalid action"}), 400
 
-    mac_norm = mac.strip().lower()
-    if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac_norm):
-        return jsonify({"error": "Invalid MAC address"}), 400
+    commands = []
+    for mac in macs:
+        mac_norm = mac.strip().lower()
+        if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac_norm):
+            continue # Skip invalid MACs
+        
+        rule_name = f"block_{sanitize_mac(mac_norm)}"
+        
+        if action == "block":
+            commands.append(
+                f"sudo uci add firewall rule; "
+                f"sudo uci set firewall.@rule[-1].name={rule_name}; "
+                f"sudo uci set firewall.@rule[-1].src=lan; "
+                f"sudo uci set firewall.@rule[-1].src_mac={mac_norm}; "
+                f"sudo uci set firewall.@rule[-1].target=DROP; "
+                f"sudo uci set firewall.@rule[-1].family=any; "
+                f"sudo uci set firewall.@rule[-1].enabled=1; "
+                f"sudo nft insert rule inet fw4 forward ether saddr {mac_norm} counter drop; "
+                f"sudo nft insert rule inet fw4 input ether saddr {mac_norm} counter drop"
+            )
+        else:
+            commands.append(
+                f"for s in $(sudo uci show firewall | grep {rule_name} | cut -d. -f2 | cut -d= -f1 | uniq); do sudo uci delete firewall.$s; done; "
+                f"for h in $(sudo nft list chain inet fw4 forward | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 forward handle $h; done; "
+                f"for h in $(sudo nft list chain inet fw4 input | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 input handle $h; done"
+            )
     
-    rule_name = f"block_{sanitize_mac(mac_norm)}"
+    if not commands:
+        return jsonify({"error": "No valid MACs provided"}), 400
+
+    # Join commands with commit and reload at the end
+    full_command = " && ".join(commands)
+    full_command += "; sudo uci commit firewall; sudo /etc/init.d/firewall reload"
     
-    if action == "block":
-        # Prepend sudo to each privileged command
-        cmd = (
-            f"sudo uci add firewall rule; "
-            f"sudo uci set firewall.@rule[-1].name={rule_name}; "
-            f"sudo uci set firewall.@rule[-1].src=lan; "
-            f"sudo uci set firewall.@rule[-1].src_mac={mac_norm}; "
-            f"sudo uci set firewall.@rule[-1].target=DROP; "
-            f"sudo uci set firewall.@rule[-1].family=any; "
-            f"sudo uci set firewall.@rule[-1].enabled=1; "
-            f"sudo uci commit firewall; "
-            f"sudo /etc/init.d/firewall reload; "
-            f"sudo nft insert rule inet fw4 forward ether saddr {mac_norm} counter drop; "
-            f"sudo nft insert rule inet fw4 input ether saddr {mac_norm} counter drop"
-        )
-    else:
-        # Loop logic runs as 'veggen', commands inside use sudo
-        cmd = (
-            f"for s in $(sudo uci show firewall | grep {rule_name} | cut -d. -f2 | cut -d= -f1 | uniq); do sudo uci delete firewall.$s; done; "
-            "sudo uci commit firewall; "
-            "sudo /etc/init.d/firewall reload; "
-            f"for h in $(sudo nft list chain inet fw4 forward | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 forward handle $h; done; "
-            f"for h in $(sudo nft list chain inet fw4 input | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 input handle $h; done"
-        )
-    
-    run_ssh_command(cmd)
+    run_ssh_command(full_command)
     return jsonify({"success": True})
 
 if __name__ == "__main__":

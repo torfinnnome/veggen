@@ -6,41 +6,79 @@
     <title>Veggen Management</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <style>
-        .status-blocked { color: #d81b60; font-weight: bold; }
-        .status-online { color: #2e7d32; font-weight: bold; }
+        :root { --pico-spacing: 0.5rem; }
+        .status-blocked { color: #d81b60; font-weight: bold; font-size: 0.85em; }
+        .status-online { color: #2e7d32; font-weight: bold; font-size: 0.85em; }
         .loading { display: none; }
         [aria-busy="true"] .loading { display: inline-block; }
+        
+        table { margin-bottom: 0; }
+        table td, table th { 
+            padding: 0.4rem 0.5rem; 
+            vertical-align: middle; 
+        }
+        
+        .group-header {
+            background-color: var(--pico-accordion-close-summary-color);
+            border-top: 2px solid var(--pico-primary);
+            border-bottom: 1px solid var(--pico-border-color);
+        }
+        .group-header td {
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+        }
+        /* Add space before group header except the first one */
+        #devices-tbody tr.group-header:not(:first-child) td {
+            padding-top: 2.5rem;
+        }
+        .kid-name {
+            font-size: 1.25em;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--pico-primary);
+            margin: 0;
+        }
+        .device-row td:first-child {
+            padding-left: 1.5rem; /* Indent devices */
+        }
+        .device-name { font-weight: 600; line-height: 1.2; }
+        .device-meta { 
+            font-size: 0.75em; 
+            color: var(--pico-muted-color); 
+            display: block;
+            margin-top: -2px;
+        }
+        
+        .batch-control {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        input[role="switch"] { margin-bottom: 0; }
     </style>
 </head>
 <body>
     <nav class="container">
-        <ul>
-            <li><strong>Veggen</strong></li>
-        </ul>
-        <ul>
-            <li><a href="/logout" class="secondary">Logout</a></li>
-        </ul>
+        <ul><li><strong>Veggen</strong></li></ul>
+        <ul><li><a href="/logout" class="secondary" style="font-size: 0.8em;">Logout</a></li></ul>
     </nav>
     <main class="container">
-        <hgroup>
-            <h1>Devices</h1>
-            <p>Manage internet access for selected devices on OpenWrt (10.11.12.1)</p>
-        </hgroup>
-
         <section id="device-list" aria-busy="true">
-            <div class="loading">Loading devices...</div>
-            <table role="grid">
+            <div class="loading">Loading...</div>
+            <table id="main-table">
                 <thead>
                     <tr>
-                        <th>Kid / Device</th>
-                        <th>MAC Address</th>
-                        <th>IP Address</th>
-                        <th>Status</th>
-                        <th>Action</th>
+                        <th>Device</th>
+                        <th style="width: 100px;">Status</th>
+                        <th style="width: 60px;">Action</th>
                     </tr>
                 </thead>
                 <tbody id="devices-tbody">
-                    <!-- Devices will be loaded here -->
+                    <!-- Dynamic content -->
                 </tbody>
             </table>
         </section>
@@ -58,56 +96,97 @@
                 tbody.innerHTML = '';
 
                 if (devices.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5">No devices found with the configured prefix.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3">No devices found.</td></tr>';
+                    return;
                 }
 
-                devices.forEach(dev => {
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = `
-                        <td><strong>${dev.name}</strong></td>
-                        <td><code>${dev.mac}</code></td>
-                        <td>${dev.ip}</td>
-                        <td class="${dev.blocked ? 'status-blocked' : 'status-online'}">
-                            ${dev.blocked ? 'BLOCKED' : 'ONLINE'}
-                        </td>
-                        <td>
-                            <button class="${dev.blocked ? 'outline' : ''}" 
-                                onclick="toggleDevice('${dev.mac}', '${dev.name}', ${dev.blocked})">
-                                ${dev.blocked ? 'Unblock' : 'Block'}
-                            </button>
+                const groups = devices.reduce((acc, dev) => {
+                    if (!acc[dev.kid]) acc[dev.kid] = [];
+                    acc[dev.kid].push(dev);
+                    return acc;
+                }, {});
+
+                for (const kid in groups) {
+                    const kidDevices = groups[kid];
+                    const allBlocked = kidDevices.every(d => d.blocked);
+                    
+                    // Group Header Row
+                    const headerRow = document.createElement('tr');
+                    headerRow.className = 'group-header';
+                    headerRow.innerHTML = `
+                        <td><h3 class="kid-name">${kid}</h3></td>
+                        <td colspan="2">
+                            <div class="batch-control">
+                                <span>BLOCK ALL</span>
+                                <input type="checkbox" role="switch" 
+                                    ${allBlocked ? 'checked' : ''} 
+                                    onchange="toggleMultiple('${kid}', this.checked)">
+                            </div>
                         </td>
                     `;
-                    tbody.appendChild(tr);
-                });
+                    tbody.appendChild(headerRow);
+
+                    // Device Rows
+                    kidDevices.forEach(dev => {
+                        const tr = document.createElement('tr');
+                        tr.className = 'device-row';
+                        tr.innerHTML = `
+                            <td>
+                                <div class="device-name">${dev.device_name}</div>
+                                <div class="device-meta">${dev.ip} | ${dev.mac}</div>
+                            </td>
+                            <td>
+                                <span class="${dev.blocked ? 'status-blocked' : 'status-online'}">
+                                    ${dev.blocked ? 'BLOCKED' : 'ONLINE'}
+                                </span>
+                            </td>
+                            <td>
+                                <input type="checkbox" role="switch" 
+                                    ${dev.blocked ? 'checked' : ''} 
+                                    onchange="toggleDevice('${dev.mac}', ${dev.blocked})">
+                            </td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                }
             } catch (error) {
-                console.error('Error fetching devices:', error);
+                console.error('Error:', error);
             } finally {
                 section.setAttribute('aria-busy', 'false');
             }
         }
 
-        async function toggleDevice(mac, name, isBlocked) {
-            const action = isBlocked ? 'unblock' : 'block';
-            if (!confirm(`Are you sure you want to ${action} ${name}?`)) return;
-
+        async function toggleDevice(mac, currentlyBlocked) {
+            const action = currentlyBlocked ? 'unblock' : 'block';
             try {
                 const response = await fetch('/api/toggle', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mac, name, action })
+                    body: JSON.stringify({ mac, action })
                 });
-                
-                if (response.ok) {
-                    await fetchDevices();
-                } else {
-                    alert('Failed to update device status.');
-                }
-            } catch (error) {
-                console.error('Error toggling device:', error);
-            }
+                if (response.ok) await fetchDevices();
+                else alert('Failed to update status.');
+            } catch (e) { console.error(e); }
         }
 
-        // Initial load
+        async function toggleMultiple(kid, shouldBlock) {
+            const action = shouldBlock ? 'block' : 'unblock';
+            try {
+                const res = await fetch('/api/devices');
+                const devices = await res.json();
+                const macs = devices.filter(d => d.kid === kid).map(d => d.mac);
+                if (macs.length === 0) return;
+
+                const response = await fetch('/api/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ macs, action })
+                });
+                if (response.ok) await fetchDevices();
+                else alert('Failed to update group.');
+            } catch (e) { console.error(e); }
+        }
+
         fetchDevices();
     </script>
 </body>
