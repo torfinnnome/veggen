@@ -1,17 +1,30 @@
 import subprocess
 import re
 import os
+import hmac
+import time
 from functools import wraps
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for
 
 # Veggen Management Application
 app = Flask(__name__)
-app.secret_key = os.urandom(24) # Random secret key for sessions
 
-ROUTER_IP = "192.168.0.1"
-SSH_USER = "veggen" # Use a restricted user instead of root
-PASSWORD = "yourpasswordhere" # <-- CHANGE THIS
+# Security: Load secrets from environment variables (never hardcode)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+ROUTER_IP = os.environ.get("VEGGEN_ROUTER_IP", "192.168.0.1")
+SSH_USER = os.environ.get("VEGGEN_SSH_USER", "veggen") # Use a restricted user instead of root
+PASSWORD = os.environ.get("VEGGEN_PASSWORD", "") # Must be set via VEGGEN_PASSWORD env var
 DHCP_PREFIX = "veggen-" # Prefix for devices to manage
+
+# Simple in-memory rate limiter for login (failsafe against brute-force)
+_failed_logins = {}  # ip -> list of timestamps
+_RATE_LIMIT_ATTEMPTS = 10
+_RATE_LIMIT_WINDOW = 60  # seconds
 
 def login_required(f):
     @wraps(f)
@@ -85,12 +98,45 @@ def get_devices():
     
     return ctrl_devices
 
+def check_rate_limit():
+    """Check if the client IP has exceeded login attempt limits."""
+    client_ip = request.remote_addr or "unknown"
+    now = time.time()
+
+    # Clean old entries
+    if client_ip in _failed_logins:
+        _failed_logins[client_ip] = [
+            t for t in _failed_logins[client_ip] if now - t < _RATE_LIMIT_WINDOW
+        ]
+        if not _failed_logins[client_ip]:
+            del _failed_logins[client_ip]
+            return
+
+    # Check limit
+    attempts = _failed_logins.get(client_ip, [])
+    if len(attempts) >= _RATE_LIMIT_ATTEMPTS:
+        return True  # Rate limited
+    return False
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        if request.form.get("password") == PASSWORD:
+        if check_rate_limit():
+            return render_template("login.html", error="Too many attempts. Wait a moment.")
+
+        password = request.form.get("password", "")
+        if not PASSWORD:
+            return render_template("login.html", error="Server misconfigured")
+
+        if hmac.compare_digest(password, PASSWORD):
+            _failed_logins.pop(request.remote_addr, None)
             session["logged_in"] = True
             return redirect(url_for("index"))
+
+        # Track failed attempt
+        client_ip = request.remote_addr or "unknown"
+        _failed_logins.setdefault(client_ip, []).append(time.time())
         return render_template("login.html", error="Invalid password")
     return render_template("login.html")
 
@@ -162,5 +208,15 @@ def toggle_access():
     run_ssh_command(full_command)
     return jsonify({"success": True})
 
+@app.after_request
+def set_security_headers(response):
+    """Add security headers to every response."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)

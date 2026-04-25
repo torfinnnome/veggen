@@ -96,7 +96,12 @@
                 tbody.innerHTML = '';
 
                 if (devices.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3">No devices found.</td></tr>';
+                    const emptyRow = document.createElement('tr');
+                    const emptyCell = document.createElement('td');
+                    emptyCell.setAttribute('colspan', '3');
+                    emptyCell.textContent = 'No devices found.';
+                    emptyRow.appendChild(emptyCell);
+                    tbody.appendChild(emptyRow);
                     return;
                 }
 
@@ -109,43 +114,77 @@
                 for (const kid in groups) {
                     const kidDevices = groups[kid];
                     const allBlocked = kidDevices.every(d => d.blocked);
-                    
-                    // Group Header Row
+
+                    // Group Header Row (DOM-safe, no innerHTML with user data)
                     const headerRow = document.createElement('tr');
                     headerRow.className = 'group-header';
-                    headerRow.innerHTML = `
-                        <td><h3 class="kid-name">${kid}</h3></td>
-                        <td colspan="2">
-                            <div class="batch-control">
-                                <span>BLOCK ALL</span>
-                                <input type="checkbox" role="switch" 
-                                    ${allBlocked ? 'checked' : ''} 
-                                    onchange="toggleMultiple('${kid}', this.checked)">
-                            </div>
-                        </td>
-                    `;
+
+                    const td1 = document.createElement('td');
+                    const h3 = document.createElement('h3');
+                    h3.className = 'kid-name';
+                    h3.textContent = kid;
+                    td1.appendChild(h3);
+                    headerRow.appendChild(td1);
+
+                    const td2 = document.createElement('td');
+                    td2.setAttribute('colspan', '2');
+
+                    const batchDiv = document.createElement('div');
+                    batchDiv.className = 'batch-control';
+
+                    const label = document.createElement('span');
+                    label.textContent = 'BLOCK ALL';
+                    batchDiv.appendChild(label);
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.setAttribute('role', 'switch');
+                    if (allBlocked) checkbox.checked = true;
+                    checkbox.addEventListener('change', function () {
+                        toggleMultiple(kid, this.checked);
+                    });
+                    batchDiv.appendChild(checkbox);
+
+                    td2.appendChild(batchDiv);
+                    headerRow.appendChild(td2);
                     tbody.appendChild(headerRow);
 
-                    // Device Rows
+                    // Device Rows (DOM-safe)
                     kidDevices.forEach(dev => {
                         const tr = document.createElement('tr');
                         tr.className = 'device-row';
-                        tr.innerHTML = `
-                            <td>
-                                <div class="device-name">${dev.device_name}</div>
-                                <div class="device-meta">${dev.ip} | ${dev.mac}</div>
-                            </td>
-                            <td>
-                                <span class="${dev.blocked ? 'status-blocked' : 'status-online'}">
-                                    ${dev.blocked ? 'BLOCKED' : 'ONLINE'}
-                                </span>
-                            </td>
-                            <td>
-                                <input type="checkbox" role="switch" 
-                                    ${dev.blocked ? 'checked' : ''} 
-                                    onchange="toggleDevice('${dev.mac}', ${dev.blocked})">
-                            </td>
-                        `;
+
+                        const nameTd = document.createElement('td');
+                        const nameDiv = document.createElement('div');
+                        nameDiv.className = 'device-name';
+                        nameDiv.textContent = dev.device_name;
+                        nameTd.appendChild(nameDiv);
+
+                        const metaDiv = document.createElement('div');
+                        metaDiv.className = 'device-meta';
+                        metaDiv.textContent = dev.ip + ' | ' + dev.mac;
+                        nameTd.appendChild(metaDiv);
+                        tr.appendChild(nameTd);
+
+                        const statusTd = document.createElement('td');
+                        const statusSpan = document.createElement('span');
+                        statusSpan.className = dev.blocked ? 'status-blocked' : 'status-online';
+                        statusSpan.textContent = dev.blocked ? 'BLOCKED' : 'ONLINE';
+                        statusTd.appendChild(statusSpan);
+                        tr.appendChild(statusTd);
+
+                        const actionTd = document.createElement('td');
+                        const devCheckbox = document.createElement('input');
+                        devCheckbox.type = 'checkbox';
+                        devCheckbox.setAttribute('role', 'switch');
+                        if (dev.blocked) devCheckbox.checked = true;
+                        const macVal = dev.mac;
+                        const blockedVal = dev.blocked;
+                        devCheckbox.addEventListener('change', function () {
+                            toggleDevice(macVal, blockedVal);
+                        });
+                        actionTd.appendChild(devCheckbox);
+                        tr.appendChild(actionTd);
                         tbody.appendChild(tr);
                     });
                 }
