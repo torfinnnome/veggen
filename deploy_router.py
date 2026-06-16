@@ -43,8 +43,8 @@ NFT_INIT_SH = r"""#!/bin/sh
     meter mac_inbound_traffic { ether daddr counter }
 """
 
-PARSE_METERS_PY = r"""import json
-import re
+PARSE_METERS_PY = r"""import re
+import sqlite3
 import subprocess
 import sys
 
@@ -61,16 +61,28 @@ def parse(cmd):
 ts = int(sys.argv[1])
 out = parse('/sbin/nft list meter inet fw4 mac_outbound_traffic 2>/dev/null')
 inf = parse('/sbin/nft list meter inet fw4 mac_inbound_traffic 2>/dev/null')
-merged = {}
+
+db = sqlite3.connect('/etc/veggen/traffic.db')
+cur = db.cursor()
+cur.execute(
+    'CREATE TABLE IF NOT EXISTS mac_traffic ('
+    'ts INTEGER, mac TEXT, bytes_in INTEGER, bytes_out INTEGER, '
+    'PRIMARY KEY (ts, mac))'
+)
+cur.execute('CREATE INDEX IF NOT EXISTS idx_mac_ts ON mac_traffic(mac, ts)')
 for mac in set(out) | set(inf):
-    merged[mac] = {"in": inf.get(mac, 0), "out": out.get(mac, 0)}
-print(json.dumps({"ts": ts, "data": merged}))
+    cur.execute(
+        'INSERT OR REPLACE INTO mac_traffic (ts, mac, bytes_in, bytes_out) VALUES (?, ?, ?, ?)',
+        (ts, mac, inf.get(mac, 0), out.get(mac, 0)),
+    )
+db.commit()
+db.close()
 """
 
 SNAPSHOT_SH = r"""#!/bin/sh
 TS=$(date +%s)
 mkdir -p /etc/veggen
-python3 /usr/share/veggen/parse_meters.py "$TS" >> /etc/veggen/traffic.jsonl
+python3 /usr/share/veggen/parse_meters.py "$TS"
 """
 
 CRON_JOB = r"""SHELL=/bin/sh
@@ -80,6 +92,32 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 
 FIREWALL_USER_MARKER = "# veggen-traffic-accounting"
+
+
+def _ensure_python_sqlite():
+    """Install python3-sqlite if not available on router."""
+    result = run_ssh("python3 -c 'import sqlite3' 2>&1 && echo ok")
+    if "ok" in result:
+        print("  ✓ python3-sqlite3 already available")
+        return
+    print("  → installing python3-sqlite...")
+    run_ssh("opkg update && opkg install python3-sqlite")
+    print("  ✓ python3-sqlite installed")
+
+
+def _init_db():
+    """Create traffic.db and schema on router."""
+    run_ssh(
+        "sudo mkdir -p /etc/veggen && "
+        "python3 -c "
+        "'import sqlite3; db = sqlite3.connect(\"/etc/veggen/traffic.db\"); "
+        "db.execute(\"CREATE TABLE IF NOT EXISTS mac_traffic \"
+        "(ts INTEGER, mac TEXT, bytes_in INTEGER, bytes_out INTEGER, \"
+        "PRIMARY KEY (ts, mac))\"); "
+        "db.execute(\"CREATE INDEX IF NOT EXISTS idx_mac_ts ON mac_traffic(mac, ts)\"); "
+        "db.commit(); db.close()' 2>/dev/null"
+    )
+    print("  ✓ traffic.db initialized")
 
 
 def _ensure_firewall_user():
@@ -99,6 +137,9 @@ def _ensure_firewall_user():
 def deploy():
     """Deploy all components. Idempotent."""
     print("Deploying nft traffic accounting...")
+
+    _ensure_python_sqlite()
+    _init_db()
 
     _write_file("/usr/share/veggen/nft-accounting-init.sh", NFT_INIT_SH)
     run_ssh("sudo chmod +x /usr/share/veggen/nft-accounting-init.sh")
