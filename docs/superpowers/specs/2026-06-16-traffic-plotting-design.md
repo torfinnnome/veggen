@@ -63,15 +63,15 @@ A cron entry `/etc/cron.d/veggen-traffic` runs every 15 minutes. It executes `/u
 
 1. Queries both nft meters via `nft list meter inet fw4 <name>`
 2. Outputs a JSON line: `{ "ts": 1234567890, "data": { "aa:bb:cc:dd:ee:ff": { "in": 123456789, "out": 987654321 }, ... } }`
-3. Appends to `/var/run/veggen-traffic.jsonl`
-4. If entry count exceeds 100,000 (~3 months), rotate: truncate to last 100,000 entries
+3. Appends to `/etc/veggen/traffic.jsonl`
+- Data is stored in `/etc/veggen/` (overlay/jffs2), not `/var/run/`, so it persists across reboots
+- Router is SSD-backed with unlimited storage — no rotation or truncation
 
 Data lifecycle:
 - Every 15 minutes: 96 entries/day
 - Per entry: ~2 KB (all LAN MACs)
 - Monthly storage: ~6 MB
-- File is truncated when entries exceed 100,000 (~3 months, ~250 MB on flash storage)
-- If storage is limited, reduce rotation threshold and accept that "Year" may not fill completely
+- Grows forever — router has SSD, unlimited storage
 
 ### 4. Router Setup Script
 
@@ -105,7 +105,7 @@ Response shape:
 
 **`GET /api/traffic/history?mac=AA:BB:CC:DD:EE:01&period=day`** — Returns aggregated history for a single device.
 - `period` is one of: `day`, `week`, `month`, `year`.
-- Fetches `/var/run/veggen-traffic.jsonl` from the router via SSH.
+- Fetches `/etc/veggen/traffic.jsonl` from the router via SSH.
 - Filters to the requested MAC and time window.
 - Delta-calculates bytes between consecutive snapshots.
 - Aggregates into time buckets (hourly for `day`, daily for `week`/`month`).
