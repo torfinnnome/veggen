@@ -1,3 +1,4 @@
+import json
 import subprocess
 import re
 import os
@@ -278,6 +279,110 @@ def toggle_access():
     
     run_ssh_command(full_command)
     return jsonify({"success": True})
+
+
+def _bucket_seconds(period):
+    return {"day": 3600, "week": 86400, "month": 86400, "year": 604800}.get(period, 86400)
+
+
+def _period_cutoff(period):
+    now = time.time()
+    return {
+        "day": now - 86400,
+        "week": now - 604800,
+        "month": now - 2592000,
+        "year": now - 31536000,
+    }.get(period, now - 86400)
+
+
+@app.route("/api/traffic/history")
+@login_required
+def traffic_history():
+    """Returns aggregated traffic history for a device."""
+    mac = request.args.get("mac", "").lower()
+    period = request.args.get("period", "day")
+
+    if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
+        return jsonify({"error": "Invalid MAC address"}), 400
+    if period not in ("day", "week", "month", "year"):
+        return jsonify({"error": "Invalid period"}), 400
+
+    raw = run_ssh_command("cat /etc/veggen/traffic.jsonl 2>/dev/null")
+    if not raw:
+        return jsonify(_empty_history(period, mac))
+
+    cutoff = _period_cutoff(period)
+    bucket_size = _bucket_seconds(period)
+
+    entries = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+            ts = record.get("ts", 0)
+            if ts >= cutoff:
+                entries.append(record)
+        except json.JSONDecodeError:
+            continue
+
+    if len(entries) < 2:
+        return jsonify(_empty_history(period, mac))
+
+    entries.sort(key=lambda e: e["ts"])
+    prev = entries[0].get("data", {}).get(mac, {"out": 0, "in": 0})
+    total_up = 0
+    total_down = 0
+    raw_deltas = []
+
+    for entry in entries[1:]:
+        ts = entry["ts"]
+        curr = entry.get("data", {}).get(mac, {"out": 0, "in": 0})
+        up = max(curr["out"] - prev["out"], 0)
+        down = max(curr["in"] - prev["in"], 0)
+        prev = curr
+        total_up += up
+        total_down += down
+        raw_deltas.append((ts, up, down))
+
+    if not raw_deltas:
+        return jsonify(_empty_history(period, mac))
+
+    buckets = {}
+    for ts, up, down in raw_deltas:
+        key = (ts // bucket_size) * bucket_size
+        if key not in buckets:
+            buckets[key] = {"ts": key, "up": 0, "down": 0}
+        buckets[key]["up"] += up
+        buckets[key]["down"] += down
+
+    sorted_buckets = sorted(buckets.values(), key=lambda b: b["ts"])
+    span_days = max((raw_deltas[-1][0] - raw_deltas[0][0]) / 86400, 1)
+    avg_up_per_day = int(total_up / span_days)
+    avg_down_per_day = int(total_down / span_days)
+
+    return jsonify({
+        "period": period,
+        "mac": mac,
+        "total_up": total_up,
+        "total_down": total_down,
+        "avg_up_per_day": avg_up_per_day,
+        "avg_down_per_day": avg_down_per_day,
+        "buckets": sorted_buckets,
+    })
+
+
+def _empty_history(period, mac):
+    return {
+        "period": period,
+        "mac": mac,
+        "total_up": 0,
+        "total_down": 0,
+        "avg_up_per_day": 0,
+        "avg_down_per_day": 0,
+        "buckets": [],
+    }
 
 
 @app.route("/api/traffic/summary")
