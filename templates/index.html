@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Veggen Management</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>
         :root { --pico-spacing: 0.5rem; }
         .status-blocked { color: #d81b60; font-weight: bold; font-size: 0.85em; }
@@ -42,7 +43,8 @@
         .device-row td:first-child {
             padding-left: 1.5rem; /* Indent devices */
         }
-        .device-name { font-weight: 600; line-height: 1.2; }
+        .device-name { font-weight: 600; line-height: 1.2; cursor: pointer; }
+        .device-name:hover { color: var(--pico-primary); }
         .device-meta { 
             font-size: 0.75em; 
             color: var(--pico-muted-color); 
@@ -59,6 +61,23 @@
             font-weight: 600;
         }
         input[role="switch"] { margin-bottom: 0; }
+        .now-cell { font-size: 10px; white-space: nowrap; }
+        .period-pills { display: flex; gap: 6px; margin-bottom: 10px; }
+        .period-pill {
+            padding: 3px 12px;
+            border-radius: 12px;
+            border: 1px solid var(--pico-border-color);
+            background: transparent;
+            font-size: 11px; cursor: pointer;
+        }
+        .period-pill.active {
+            background: var(--pico-primary);
+            color: white;
+            border-color: var(--pico-primary);
+        }
+        .detail-stats { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
+        .detail-stats strong { font-weight: 700; }
+        .chart-container { position: relative; height: 200px; width: 100%; }
     </style>
 </head>
 <body>
@@ -73,6 +92,7 @@
                 <thead>
                     <tr>
                         <th>Device</th>
+                        <th style="width: 110px;">Now</th>
                         <th style="width: 100px;">Status</th>
                         <th style="width: 60px;">Action</th>
                     </tr>
@@ -85,6 +105,155 @@
     </main>
 
     <script>
+        var _detailCache = {};
+        var _currentChart = null;
+
+        function _formatBytes(b) {
+            if (b === 0) return '0 B';
+            var k = 1024;
+            var sizes = ['B','KB','MB','GB','TB'];
+            var i = Math.floor(Math.log(b) / Math.log(k));
+            return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        async function _pollTrafficSummary() {
+            try {
+                var res = await fetch('/api/traffic/summary');
+                var data = await res.json();
+                for (var mac in data) {
+                    var speeds = data[mac];
+                    var els = document.querySelectorAll('[data-mac="' + mac + '"]');
+                    els.forEach(function (el) {
+                        if (el.classList.contains('down-speed')) el.textContent = speeds.down_text || '\u2014';
+                        else if (el.classList.contains('up-speed')) el.textContent = speeds.up_text || '\u2014';
+                    });
+                }
+            } catch (e) { /* non-critical */ }
+        }
+
+        function _createDetailRow(mac) {
+            var row = document.createElement('tr');
+            row.className = 'detail-row';
+            row.setAttribute('data-mac', mac);
+            row.style.display = 'none';
+            var td = document.createElement('td');
+            td.setAttribute('colspan', '4');
+            td.style.padding = '14px 14px 14px 34px';
+            row.appendChild(td);
+            return row;
+        }
+
+        async function _fetchHistory(mac, period) {
+            try {
+                var res = await fetch('/api/traffic/history?mac=' + mac + '&period=' + period);
+                var data = await res.json();
+                _detailCache[mac] = data;
+                return data;
+            } catch (e) {
+                console.error('Error fetching history:', e);
+                return null;
+            }
+        }
+
+        function toggleDetail(dev) {
+            var mac = dev.mac;
+            var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
+            if (!det || det.style.display === 'none') {
+                if (!det) {
+                    var speedEl = document.querySelector('.down-speed[data-mac="' + mac + '"]');
+                    if (!speedEl) return;
+                    var parentTr = speedEl.closest('tr.device-row');
+                    det = _createDetailRow(mac);
+                    parentTr.parentNode.insertBefore(det, parentTr.nextSibling);
+                }
+                det.style.display = '';
+                (async function () {
+                    var period = 'day';
+                    var data = _detailCache[mac];
+                    if (!data) data = await _fetchHistory(mac, period);
+                    if (data && data.period) period = data.period;
+                    _renderDetail(mac, data || {}, period);
+                })();
+            } else {
+                det.style.display = 'none';
+            }
+        }
+
+        function _renderDetail(mac, data, period) {
+            var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
+            if (!det) return;
+            var td = det.querySelector('td');
+            td.innerHTML = '';
+            var container = document.createElement('div');
+            var pillsDiv = document.createElement('div');
+            pillsDiv.className = 'period-pills';
+            var periods = ['day', 'week', 'month', 'year'];
+            for (var pi = 0; pi < periods.length; pi++) {
+                (function (p) {
+                    var pill = document.createElement('button');
+                    pill.className = 'period-pill' + (p === period ? ' active' : '');
+                    pill.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+                    pill.addEventListener('click', function () {
+                        pillsDiv.querySelectorAll('.period-pill').forEach(function (el) { el.classList.remove('active'); });
+                        pill.classList.add('active');
+                        _detailCache[mac] = null;
+                        (async function () {
+                            var d = await _fetchHistory(mac, p);
+                            if (d) _renderDetail(mac, d, p);
+                        })();
+                    });
+                    pillsDiv.appendChild(pill);
+                })(periods[pi]);
+            }
+            container.appendChild(pillsDiv);
+            var statsDiv = document.createElement('div');
+            statsDiv.className = 'detail-stats';
+            var downL = document.createElement('span');
+            downL.innerHTML = '\u2193 <strong>' + _formatBytes(data.total_down || 0) + '</strong>';
+            statsDiv.appendChild(downL);
+            var upL = document.createElement('span');
+            upL.innerHTML = '\u2191 <strong>' + _formatBytes(data.total_up || 0) + '</strong>';
+            statsDiv.appendChild(upL);
+            var avgD = document.createElement('span');
+            avgD.textContent = 'avg ' + _formatBytes(data.avg_down_per_day || 0) + '/day';
+            statsDiv.appendChild(avgD);
+            var avgU = document.createElement('span');
+            avgU.textContent = 'avg ' + _formatBytes(data.avg_up_per_day || 0) + '/day';
+            statsDiv.appendChild(avgU);
+            container.appendChild(statsDiv);
+            var cw = document.createElement('div');
+            cw.className = 'chart-container';
+            var canvas = document.createElement('canvas');
+            cw.appendChild(canvas);
+            container.appendChild(cw);
+            td.appendChild(container);
+            if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
+            if (!data.buckets || data.buckets.length === 0) return;
+            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            _currentChart = new Chart(canvas, {
+                type: 'bar',
+                data: {
+                    labels: data.buckets.map(function (bk) {
+                        var d = new Date(bk.ts * 1000);
+                        return months[d.getMonth()] + ' ' + d.getDate();
+                    }),
+                    datasets: [
+                        { label: 'Down', data: data.buckets.map(function (bk) { return bk.down; }), backgroundColor: '#1565c0' },
+                        { label: 'Up', data: data.buckets.map(function (bk) { return bk.up; }), backgroundColor: '#c62828' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { stacked: false, grid: { display: false } },
+                        y: { beginAtZero: true, ticks: { callback: function (v) { return _formatBytes(v); } } }
+                    }
+                }
+            });
+        }
+
         async function fetchDevices() {
             const section = document.getElementById('device-list');
             section.setAttribute('aria-busy', 'true');
@@ -98,7 +267,7 @@
                 if (devices.length === 0) {
                     const emptyRow = document.createElement('tr');
                     const emptyCell = document.createElement('td');
-                    emptyCell.setAttribute('colspan', '3');
+                    emptyCell.setAttribute('colspan', '4');
                     emptyCell.textContent = 'No devices found.';
                     emptyRow.appendChild(emptyCell);
                     tbody.appendChild(emptyRow);
@@ -127,7 +296,7 @@
                     headerRow.appendChild(td1);
 
                     const td2 = document.createElement('td');
-                    td2.setAttribute('colspan', '2');
+                    td2.setAttribute('colspan', '3');
 
                     const batchDiv = document.createElement('div');
                     batchDiv.className = 'batch-control';
@@ -166,6 +335,11 @@
                         nameTd.appendChild(metaDiv);
                         tr.appendChild(nameTd);
 
+                        const nowTd = document.createElement('td');
+                        nowTd.className = 'now-cell';
+                        nowTd.innerHTML = '<span style="color: #1565c0;">\u2193 <span class="down-speed" data-mac="' + dev.mac + '">\u2014</span></span><br><span style="color: #c62828;">\u2191 <span class="up-speed" data-mac="' + dev.mac + '">\u2014</span></span>';
+                        tr.appendChild(nowTd);
+
                         const statusTd = document.createElement('td');
                         const statusSpan = document.createElement('span');
                         statusSpan.className = dev.blocked ? 'status-blocked' : 'status-online';
@@ -186,6 +360,10 @@
                         actionTd.appendChild(devCheckbox);
                         tr.appendChild(actionTd);
                         tbody.appendChild(tr);
+                        nameDiv.addEventListener('click', function () {
+                            toggleDetail(dev);
+                        });
+                        _detailCache[dev.mac] = _detailCache[dev.mac] || null;
                     });
                 }
             } catch (error) {
@@ -227,6 +405,8 @@
         }
 
         fetchDevices();
+        _pollTrafficSummary();
+        setInterval(_pollTrafficSummary, 15000);
     </script>
 </body>
 </html>
