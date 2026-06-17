@@ -379,12 +379,12 @@
 
         function updateTrafficCells() {
             document.querySelectorAll('.traffic-down[data-mac]').forEach(function(el) {
-                var mac = el.getAttribute('data-mac');
+                var mac = el.getAttribute('data-mac').toLowerCase();
                 var t = _batchTraffic[mac];
                 el.textContent = (t && t.down > 0) ? _formatBytes(t.down) : '';
             });
             document.querySelectorAll('.traffic-up[data-mac]').forEach(function(el) {
-                var mac = el.getAttribute('data-mac');
+                var mac = el.getAttribute('data-mac').toLowerCase();
                 var t = _batchTraffic[mac];
                 el.textContent = (t && t.up > 0) ? _formatBytes(t.up) : '';
             });
@@ -634,6 +634,7 @@ cell.setAttribute('colspan', '5');
             } catch (error) {
                 console.error('Error:', error);
             } finally {
+                updateTrafficCells();
                 section.setAttribute('aria-busy', 'false');
             }
         }
