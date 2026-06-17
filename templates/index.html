@@ -61,7 +61,7 @@
             font-weight: 600;
         }
         input[role="switch"] { margin-bottom: 0; }
-        .now-cell { font-size: 10px; white-space: nowrap; }
+
         .period-pills { display: flex; gap: 6px; margin-bottom: 10px; }
         .period-pill {
             padding: 3px 12px;
@@ -152,8 +152,8 @@
                     <thead>
                         <tr>
                             <th>Device</th>
-                            <th style="width: 110px;">Now</th>
-                            <th style="width: 150px;">Traffic</th>
+                            <th style="width: 130px;">Traffic ↓</th>
+                            <th style="width: 130px;">Traffic ↑</th>
                             <th style="width: 100px;">Status</th>
                             <th style="width: 60px;">Action</th>
                         </tr>
@@ -168,13 +168,12 @@
                             <th class="sortable-header" onclick="sortAllHostsCol(0)">Device</th>
                             <th class="sortable-header" style="width: 140px;" onclick="sortAllHostsCol(1)">IP</th>
                             <th class="sortable-header" style="width: 160px;" onclick="sortAllHostsCol(2)">MAC</th>
-                            <th class="sortable-header" style="width: 110px;" onclick="sortAllHostsCol(3)">Now</th>
-                            <th class="sortable-header" style="width: 130px;" onclick="sortAllHostsCol(4)">Traffic ↓</th>
-                            <th class="sortable-header" style="width: 130px;" onclick="sortAllHostsCol(5)">Traffic ↑</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortAllHostsCol(3)">Traffic ↓</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortAllHostsCol(4)">Traffic ↑</th>
                         </tr>
                     </thead>
                     <tbody id="allhosts-tbody">
-                        <tr><td colspan="6">Loading...</td></tr>
+                        <tr><td colspan="5">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -191,48 +190,6 @@
             var sizes = ['B','KB','MB','GB','TB'];
             var i = Math.floor(Math.log(b) / Math.log(k));
             return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-        }
-
-        var _lastTrafficSummary = {};
-
-        async function _pollTrafficSummary() {
-            try {
-                var res = await fetch('/api/traffic/summary');
-                var data = await res.json();
-                _lastTrafficSummary = data;
-                for (var mac in data) {
-                    var speeds = data[mac];
-                    var els = document.querySelectorAll('[data-mac="' + mac + '"]');
-                    els.forEach(function (el) {
-                        if (el.classList.contains('down-speed')) el.textContent = speeds.down_text || '\u2014';
-                        else if (el.classList.contains('up-speed')) el.textContent = speeds.up_text || '\u2014';
-                    });
-                }
-                _updateAllHostsVisibility();
-            } catch (e) { /* non-critical */ }
-        }
-
-        function _updateAllHostsVisibility() {
-            var tbody = document.getElementById('allhosts-tbody');
-            if (!tbody) return;
-            var rows = tbody.querySelectorAll('tr');
-            rows.forEach(function(row) {
-                var macCell = row.querySelector('td:nth-child(3)');
-                if (!macCell) return;
-                var mac = macCell.textContent;
-                var nowCell = row.querySelector('td:nth-child(4)');
-                if (!nowCell) return;
-                if (_lastTrafficSummary[mac]) {
-                    if (!nowCell.querySelector('.down-speed')) {
-                        nowCell.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + mac + '">\u2193 <span class="down-speed" data-mac="' + mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + mac + '">\u2191 <span class="up-speed" data-mac="' + mac + '">\u2014</span></span>';
-                    }
-                } else {
-                    if (nowCell.querySelector('.down-speed')) {
-                        nowCell.innerHTML = '';
-                    }
-                }
-            });
-            setupSpeedClicks();
         }
 
         function _createDetailRow(mac) {
@@ -264,8 +221,7 @@
             if (!det || det.style.display === 'none') {
                 if (!det) {
                     var parentTr = dev._parentTr ||
-                        (document.querySelector('.down-speed[data-mac="' + mac + '"]') ||
-                         document.querySelector('[data-mac="' + mac + '"]'))?.closest('tr');
+                        document.querySelector('[data-mac="' + mac + '"]')?.closest('tr');
                     if (!parentTr) return;
                     det = _createDetailRow(mac);
                     var colspan = parentTr.parentNode.querySelectorAll('tr:first-child th, tr:first-child td').length || 5;
@@ -339,7 +295,17 @@
             var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             var labels = data.buckets.map(function (bk) {
                 var d = new Date(bk.ts * 1000);
+                if (period === 'day') {
+                    var h = d.getHours();
+                    var m = d.getMinutes();
+                    return h + ':' + (m < 10 ? '0' : '') + m;
+                }
                 return months[d.getMonth()] + ' ' + d.getDate();
+            });
+            var maxMbps = 0;
+            data.buckets.forEach(function (bk) {
+                if (bk.down_mbps > maxMbps) maxMbps = bk.down_mbps;
+                if (bk.up_mbps > maxMbps) maxMbps = bk.up_mbps;
             });
             _currentChart = new Chart(canvas, {
                 type: 'line',
@@ -348,7 +314,7 @@
                     datasets: [
                         {
                             label: 'Down',
-                            data: data.buckets.map(function (bk) { return bk.down; }),
+                            data: data.buckets.map(function (bk) { return bk.down_mbps; }),
                             borderColor: '#1565c0',
                             backgroundColor: 'rgba(21,101,192,0.35)',
                             fill: 'origin',
@@ -358,7 +324,7 @@
                         },
                         {
                             label: 'Up',
-                            data: data.buckets.map(function (bk) { return -bk.up; }),
+                            data: data.buckets.map(function (bk) { return -bk.up_mbps; }),
                             borderColor: '#c62828',
                             backgroundColor: 'rgba(198,40,40,0.35)',
                             fill: 'origin',
@@ -376,7 +342,15 @@
                         x: { grid: { display: false } },
                         y: {
                             beginAtZero: true,
-                            ticks: { callback: function (v) { return _formatBytes(Math.abs(v)); } }
+                            ticks: {
+                                callback: function (v) {
+                                    var av = Math.abs(v);
+                                    if (av >= 1) return av.toFixed(1) + ' Mbps';
+                                    var kbps = av * 1000;
+                                    if (kbps >= 1) return kbps.toFixed(0) + ' kbps';
+                                    return (kbps * 1000).toFixed(0) + ' bps';
+                                }
+                            }
                         }
                     }
                 }
@@ -414,15 +388,6 @@
                 var t = _batchTraffic[mac];
                 el.textContent = (t && t.up > 0) ? _formatBytes(t.up) : '';
             });
-            document.querySelectorAll('.traffic-cell[data-mac]').forEach(function(el) {
-                var mac = el.getAttribute('data-mac');
-                var t = _batchTraffic[mac];
-                if (t && (t.up > 0 || t.down > 0)) {
-                    el.textContent = '\u2193' + _formatBytes(t.down) + ' + \u2191' + _formatBytes(t.up);
-                } else {
-                    el.textContent = '';
-                }
-            });
             sortAllHosts();
         }
 
@@ -435,16 +400,6 @@
                 _allHostsSort.dir = 'desc';
             }
             sortAllHosts();
-        }
-
-        function _parseBytes(s) {
-            if (!s) return 0;
-            var parts = s.trim().split(/\s+/);
-            if (parts.length < 2) return 0;
-            var val = parseFloat(parts[0]);
-            var unit = parts[1].toUpperCase();
-            var multipliers = { 'B': 1, 'KB': 1024, 'MB': 1048576, 'GB': 1073741824, 'TB': 1099511627776 };
-            return val * (multipliers[unit] || 1);
         }
 
         function sortAllHosts() {
@@ -461,18 +416,23 @@
                 if (col === 0) { aVal = a.querySelector('td:nth-child(1)').textContent; bVal = b.querySelector('td:nth-child(1)').textContent; }
                 else if (col === 1) { aVal = a.querySelector('td:nth-child(2)').textContent; bVal = b.querySelector('td:nth-child(2)').textContent; }
                 else if (col === 2) { aVal = macA; bVal = macB; }
-                else if (col === 3) { var na = a.querySelector('td:nth-child(4)').textContent.trim(); var nb = b.querySelector('td:nth-child(4)').textContent.trim(); aVal = _parseBytes(na); bVal = _parseBytes(nb); }
-                else if (col === 4) { aVal = _batchTraffic[macA]?.down || 0; bVal = _batchTraffic[macB]?.down || 0; }
-                else if (col === 5) { aVal = _batchTraffic[macA]?.up || 0; bVal = _batchTraffic[macB]?.up || 0; }
+                else if (col === 3) { aVal = _batchTraffic[macA]?.down || 0; bVal = _batchTraffic[macB]?.down || 0; }
+                else if (col === 4) { aVal = _batchTraffic[macA]?.up || 0; bVal = _batchTraffic[macB]?.up || 0; }
                 else { aVal = a.querySelector('td:nth-child(1)').textContent; bVal = b.querySelector('td:nth-child(1)').textContent; }
                 var cmp = 0;
                 if (typeof aVal === 'string') cmp = aVal.localeCompare(bVal);
                 else cmp = aVal - bVal;
                 return dir === 'desc' ? -cmp : cmp;
             });
-            rows.forEach(function(row) { tbody.appendChild(row); });
+            rows.forEach(function(row) {
+                var det = row.nextSibling;
+                tbody.appendChild(row);
+                if (det && det.className && det.className.indexOf('detail-row') !== -1) {
+                    tbody.appendChild(det);
+                }
+            });
             var headers = tbody.parentNode.querySelectorAll('.sortable-header');
-            var baseLabels = ['Device', 'IP', 'MAC', 'Now', 'Traffic \u2193', 'Traffic \u2191'];
+            var baseLabels = ['Device', 'IP', 'MAC', 'Traffic \u2193', 'Traffic \u2191'];
             headers.forEach(function(th, i) {
                 th.textContent = baseLabels[i] || th.textContent;
                 if (_allHostsSort.col === i) th.classList.add('active-sort');
@@ -496,7 +456,7 @@
                 if (hosts.length === 0) {
                     var row = document.createElement('tr');
                     var cell = document.createElement('td');
-cell.setAttribute('colspan', '6');
+cell.setAttribute('colspan', '5');
                     cell.textContent = 'No hosts found.';
                     row.appendChild(cell);
                     tbody.appendChild(row);
@@ -516,10 +476,6 @@ cell.setAttribute('colspan', '6');
                     var macTd = document.createElement('td');
                     macTd.textContent = host.mac;
                     tr.appendChild(macTd);
-                    var nowTd = document.createElement('td');
-                    nowTd.className = 'now-cell';
-                    nowTd.innerHTML = '';
-                    tr.appendChild(nowTd);
                     var downTd = document.createElement('td');
                     downTd.className = 'traffic-down';
                     downTd.setAttribute('data-mac', host.mac);
@@ -534,21 +490,11 @@ cell.setAttribute('colspan', '6');
                     });
                     _detailCache[host.mac] = _detailCache[host.mac] || null;
                 });
-                setupSpeedClicks();
+
                 sortAllHosts();
             } catch (e) {
                 console.error('Error fetching all hosts:', e);
             }
-        }
-
-        function setupSpeedClicks() {
-            document.querySelectorAll('.speed-click:not(.bound)').forEach(function(el) {
-                el.classList.add('bound');
-                el.addEventListener('click', function() {
-                    var mac = el.getAttribute('data-mac');
-                    toggleDetail({ mac: mac, _parentTr: el.closest('tr') });
-                });
-            });
         }
 
         async function fetchDevices() {
@@ -632,15 +578,15 @@ cell.setAttribute('colspan', '6');
                         nameTd.appendChild(metaDiv);
                         tr.appendChild(nameTd);
 
-                        const nowTd = document.createElement('td');
-                        nowTd.className = 'now-cell';
-                        nowTd.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2193 <span class="down-speed" data-mac="' + dev.mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2191 <span class="up-speed" data-mac="' + dev.mac + '">\u2014</span></span>';
-                        tr.appendChild(nowTd);
+                        const downTd = document.createElement('td');
+                        downTd.className = 'traffic-down';
+                        downTd.setAttribute('data-mac', dev.mac);
+                        tr.appendChild(downTd);
 
-                        const trafficTd = document.createElement('td');
-                        trafficTd.className = 'traffic-cell';
-                        trafficTd.setAttribute('data-mac', dev.mac);
-                        tr.appendChild(trafficTd);
+                        const upTd = document.createElement('td');
+                        upTd.className = 'traffic-up';
+                        upTd.setAttribute('data-mac', dev.mac);
+                        tr.appendChild(upTd);
 
                         const statusTd = document.createElement('td');
                         const statusSpan = document.createElement('span');
@@ -708,10 +654,7 @@ cell.setAttribute('colspan', '6');
 
         fetchDevices();
         fetchAllHosts();
-        _pollTrafficSummary();
         fetchBatchTraffic();
-        setInterval(_pollTrafficSummary, 15000);
-        setTimeout(function() { setupSpeedClicks(); }, 100);
     </script>
 </body>
 </html>

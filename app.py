@@ -383,7 +383,11 @@ def traffic_history():
             bucket_ts = int(parts[0])
             bucket_up = max(0, int(parts[1]))
             bucket_down = max(0, int(parts[2]))
-            buckets.append({"ts": bucket_ts, "up": bucket_up, "down": bucket_down})
+            # Rate in Mbps: bytes / bucket_seconds * 8 / 1_000_000
+            up_mbps = round(bucket_up * 8 / bucket_size / 1_000_000, 3)
+            down_mbps = round(bucket_down * 8 / bucket_size / 1_000_000, 3)
+            buckets.append({"ts": bucket_ts, "up": bucket_up, "down": bucket_down,
+                            "up_mbps": up_mbps, "down_mbps": down_mbps})
             total_up += bucket_up
             total_down += bucket_down
         except (ValueError, IndexError):
@@ -392,7 +396,21 @@ def traffic_history():
     if not buckets:
         return jsonify(_empty_history(period, mac))
 
-    span_days = max((buckets[-1]["ts"] - buckets[0]["ts"]) / 86400, 1)
+    # Fill empty buckets so the chart shows zeros instead of skipping time
+    first_ts = buckets[0]["ts"]
+    last_ts = buckets[-1]["ts"]
+    bucket_map = {b["ts"]: b for b in buckets}
+    filled = []
+    ts = first_ts
+    while ts <= last_ts:
+        if ts in bucket_map:
+            filled.append(bucket_map[ts])
+        else:
+            filled.append({"ts": ts, "up": 0, "down": 0, "up_mbps": 0, "down_mbps": 0})
+        ts += bucket_size
+    buckets = filled
+
+    span_days = max((last_ts - first_ts) / 86400, 1)
     avg_up_per_day = int(total_up / span_days)
     avg_down_per_day = int(total_down / span_days)
 
