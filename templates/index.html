@@ -104,6 +104,18 @@
             color: var(--pico-primary);
             border-bottom-color: var(--pico-primary);
         }
+        .period-select {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+            padding: 0.25rem 0.5rem;
+            width: auto;
+        }
+        .traffic-cell {
+            font-size: 10px;
+            white-space: nowrap;
+            color: var(--pico-muted-color);
+        }
     </style>
 </head>
 <body>
@@ -113,6 +125,12 @@
     </nav>
     <main class="container">
         <section id="device-list" aria-busy="true">
+            <select id="period-select" class="period-select" onchange="onPeriodChange()">
+                <option value="day">Day</option>
+                <option value="week">Week</option>
+                <option value="month">Month</option>
+                <option value="year">Year</option>
+            </select>
             <div class="tab-bar">
                 <button class="tab-btn active" onclick="switchTab('managed')">Managed</button>
                 <button class="tab-btn" onclick="switchTab('allhosts')">All Hosts</button>
@@ -124,6 +142,7 @@
                         <tr>
                             <th>Device</th>
                             <th style="width: 110px;">Now</th>
+                            <th style="width: 150px;">Traffic</th>
                             <th style="width: 100px;">Status</th>
                             <th style="width: 60px;">Action</th>
                         </tr>
@@ -139,6 +158,7 @@
                             <th style="width: 140px;">IP</th>
                             <th style="width: 160px;">MAC</th>
                             <th style="width: 110px;">Now</th>
+                            <th style="width: 150px;">Traffic</th>
                         </tr>
                     </thead>
                     <tbody id="allhosts-tbody">
@@ -328,6 +348,37 @@
             });
         }
 
+        var _batchTraffic = {};
+        var _currentPeriod = 'day';
+
+        function onPeriodChange() {
+            _currentPeriod = document.getElementById('period-select').value;
+            fetchBatchTraffic();
+        }
+
+        async function fetchBatchTraffic() {
+            try {
+                var res = await fetch('/api/traffic/batch-history?period=' + _currentPeriod);
+                var data = await res.json();
+                _batchTraffic = data.macs || {};
+                updateTrafficCells();
+            } catch (e) {
+                console.error('Error fetching batch traffic:', e);
+            }
+        }
+
+        function updateTrafficCells() {
+            document.querySelectorAll('.traffic-cell[data-mac]').forEach(function(el) {
+                var mac = el.getAttribute('data-mac');
+                var t = _batchTraffic[mac];
+                if (t && (t.up > 0 || t.down > 0)) {
+                    el.textContent = '\u2193' + _formatBytes(t.down) + ' + \u2191' + _formatBytes(t.up);
+                } else {
+                    el.textContent = '';
+                }
+            });
+        }
+
         function switchTab(tab) {
             document.querySelectorAll('.tab-btn').forEach(function(btn) { btn.classList.remove('active'); });
             document.querySelector('.tab-btn[onclick="switchTab(\'' + tab + '\')"]').classList.add('active');
@@ -344,7 +395,7 @@
                 if (hosts.length === 0) {
                     var row = document.createElement('tr');
                     var cell = document.createElement('td');
-                    cell.setAttribute('colspan', '4');
+                    cell.setAttribute('colspan', '5');
                     cell.textContent = 'No hosts found.';
                     row.appendChild(cell);
                     tbody.appendChild(row);
@@ -368,6 +419,10 @@
                     nowTd.className = 'now-cell';
                     nowTd.innerHTML = '';
                     tr.appendChild(nowTd);
+                    var trafficTd = document.createElement('td');
+                    trafficTd.className = 'traffic-cell';
+                    trafficTd.setAttribute('data-mac', host.mac);
+                    tr.appendChild(trafficTd);
                     tbody.appendChild(tr);
                     nameTd.addEventListener('click', function() {
                         toggleDetail({ mac: host.mac });
@@ -403,7 +458,7 @@
                 if (devices.length === 0) {
                     const emptyRow = document.createElement('tr');
                     const emptyCell = document.createElement('td');
-                    emptyCell.setAttribute('colspan', '4');
+                    emptyCell.setAttribute('colspan', '5');
                     emptyCell.textContent = 'No devices found.';
                     emptyRow.appendChild(emptyCell);
                     tbody.appendChild(emptyRow);
@@ -432,7 +487,7 @@
                     headerRow.appendChild(td1);
 
                     const td2 = document.createElement('td');
-                    td2.setAttribute('colspan', '3');
+                    td2.setAttribute('colspan', '4');
 
                     const batchDiv = document.createElement('div');
                     batchDiv.className = 'batch-control';
@@ -475,6 +530,11 @@
                         nowTd.className = 'now-cell';
                         nowTd.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2193 <span class="down-speed" data-mac="' + dev.mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2191 <span class="up-speed" data-mac="' + dev.mac + '">\u2014</span></span>';
                         tr.appendChild(nowTd);
+
+                        const trafficTd = document.createElement('td');
+                        trafficTd.className = 'traffic-cell';
+                        trafficTd.setAttribute('data-mac', dev.mac);
+                        tr.appendChild(trafficTd);
 
                         const statusTd = document.createElement('td');
                         const statusSpan = document.createElement('span');
@@ -543,6 +603,7 @@
         fetchDevices();
         fetchAllHosts();
         _pollTrafficSummary();
+        fetchBatchTraffic();
         setInterval(_pollTrafficSummary, 15000);
         setTimeout(function() { setupSpeedClicks(); }, 100);
     </script>
