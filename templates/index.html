@@ -157,10 +157,13 @@
             return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
         }
 
+        var _lastTrafficSummary = {};
+
         async function _pollTrafficSummary() {
             try {
                 var res = await fetch('/api/traffic/summary');
                 var data = await res.json();
+                _lastTrafficSummary = data;
                 for (var mac in data) {
                     var speeds = data[mac];
                     var els = document.querySelectorAll('[data-mac="' + mac + '"]');
@@ -169,7 +172,31 @@
                         else if (el.classList.contains('up-speed')) el.textContent = speeds.up_text || '\u2014';
                     });
                 }
+                _updateAllHostsVisibility();
             } catch (e) { /* non-critical */ }
+        }
+
+        function _updateAllHostsVisibility() {
+            var tbody = document.getElementById('allhosts-tbody');
+            if (!tbody) return;
+            var rows = tbody.querySelectorAll('tr');
+            rows.forEach(function(row) {
+                var macCell = row.querySelector('td:nth-child(3)');
+                if (!macCell) return;
+                var mac = macCell.textContent;
+                var nowCell = row.querySelector('td:nth-child(4)');
+                if (!nowCell) return;
+                if (_lastTrafficSummary[mac]) {
+                    if (!nowCell.querySelector('.down-speed')) {
+                        nowCell.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + mac + '">\u2193 <span class="down-speed" data-mac="' + mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + mac + '">\u2191 <span class="up-speed" data-mac="' + mac + '">\u2014</span></span>';
+                    }
+                } else {
+                    if (nowCell.querySelector('.down-speed')) {
+                        nowCell.innerHTML = '';
+                    }
+                }
+            });
+            setupSpeedClicks();
         }
 
         function _createDetailRow(mac) {
@@ -203,7 +230,7 @@
                 if (!det) {
                     var speedEl = document.querySelector('.down-speed[data-mac="' + mac + '"]');
                     if (!speedEl) return;
-                    var parentTr = speedEl.closest('tr.device-row');
+                    var parentTr = speedEl.closest('tr');
                     det = _createDetailRow(mac);
                     parentTr.parentNode.insertBefore(det, parentTr.nextSibling);
                 }
@@ -331,14 +358,25 @@
                     tr.appendChild(macTd);
                     var nowTd = document.createElement('td');
                     nowTd.className = 'now-cell';
-                    nowTd.innerHTML = '<span style="color: #1565c0;">\u2193 <span class="down-speed" data-mac="' + host.mac + '">\u2014</span></span><br><span style="color: #c62828;">\u2191 <span class="up-speed" data-mac="' + host.mac + '">\u2014</span></span>';
+                    nowTd.innerHTML = '';
                     tr.appendChild(nowTd);
                     tbody.appendChild(tr);
                     _detailCache[host.mac] = _detailCache[host.mac] || null;
                 });
+                setupSpeedClicks();
             } catch (e) {
                 console.error('Error fetching all hosts:', e);
             }
+        }
+
+        function setupSpeedClicks() {
+            document.querySelectorAll('.speed-click:not(.bound)').forEach(function(el) {
+                el.classList.add('bound');
+                el.addEventListener('click', function() {
+                    var mac = el.getAttribute('data-mac');
+                    toggleDetail({ mac: mac });
+                });
+            });
         }
 
         async function fetchDevices() {
@@ -424,7 +462,7 @@
 
                         const nowTd = document.createElement('td');
                         nowTd.className = 'now-cell';
-                        nowTd.innerHTML = '<span style="color: #1565c0;">\u2193 <span class="down-speed" data-mac="' + dev.mac + '">\u2014</span></span><br><span style="color: #c62828;">\u2191 <span class="up-speed" data-mac="' + dev.mac + '">\u2014</span></span>';
+                        nowTd.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2193 <span class="down-speed" data-mac="' + dev.mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2191 <span class="up-speed" data-mac="' + dev.mac + '">\u2014</span></span>';
                         tr.appendChild(nowTd);
 
                         const statusTd = document.createElement('td');
@@ -495,6 +533,7 @@
         fetchAllHosts();
         _pollTrafficSummary();
         setInterval(_pollTrafficSummary, 15000);
+        setTimeout(function() { setupSpeedClicks(); }, 100);
     </script>
 </body>
 </html>
