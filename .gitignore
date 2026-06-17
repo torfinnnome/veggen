@@ -10,3 +10,5 @@ venv/
 *.pem
 *.key
 .superpowers/
+setup.sh
+runme.sh

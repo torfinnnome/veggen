@@ -1,3 +1,4 @@
+import json
 import subprocess
 import re
 import os
@@ -20,6 +21,9 @@ ROUTER_IP = os.environ.get("VEGGEN_ROUTER_IP", "192.168.0.1")
 SSH_USER = os.environ.get("VEGGEN_SSH_USER", "veggen") # Use a restricted user instead of root
 PASSWORD = os.environ.get("VEGGEN_PASSWORD", "") # Must be set via VEGGEN_PASSWORD env var
 DHCP_PREFIX = "veggen-" # Prefix for devices to manage
+
+_traffic_prev = {}
+_traffic_ts = 0.0
 
 # Simple in-memory rate limiter for login (failsafe against brute-force)
 _failed_logins = {}  # ip -> list of timestamps
@@ -54,6 +58,74 @@ def sanitize_mac(mac):
     """Sanitizes MAC address for use in UCI rule names."""
     return mac.replace(":", "").lower()
 
+
+def _parse_meter(name):
+    """Runs nft list meter and returns {mac: bytes} for each entry."""
+    output = run_ssh_command(f'sudo /usr/sbin/nft list meter inet fw4 {name} 2>/dev/null')
+    result = {}
+    for line in output.splitlines():
+        match = re.match(r'([0-9a-f:]+) counter packets \d+ bytes (\d+)', line)
+        if match:
+            mac, bytes_str = match.groups()
+            if mac != "ff:ff:ff:ff:ff:ff":
+                result[mac.lower()] = int(bytes_str)
+    return result
+
+
+def _read_meters():
+    """Returns current meter readings as {"up": {mac: bytes}, "down": {mac: bytes}}."""
+    return {
+        "up": _parse_meter("mac_outbound_traffic"),
+        "down": _parse_meter("mac_inbound_traffic"),
+    }
+
+
+def _traffic_delta():
+    """Compares current meter readings to previous, returns delta per MAC."""
+    global _traffic_prev, _traffic_ts
+
+    current = _read_meters()
+    now = time.time()
+
+    if not _traffic_prev:
+        _traffic_prev = current
+        _traffic_ts = now
+        return {}, 0.0
+
+    elapsed = max(now - _traffic_ts, 0.1)
+
+    delta = {}
+    all_macs = (set(_traffic_prev["up"]) | set(_traffic_prev["down"]) |
+                set(current["up"]) | set(current["down"]))
+    for mac in all_macs:
+        prev_up = _traffic_prev["up"].get(mac, 0)
+        prev_down = _traffic_prev["down"].get(mac, 0)
+        curr_up = current["up"].get(mac, 0)
+        curr_down = current["down"].get(mac, 0)
+
+        delta[mac] = {
+            "up": max(curr_up - prev_up, 0),
+            "down": max(curr_down - prev_down, 0),
+        }
+
+    _traffic_prev = current
+    _traffic_ts = now
+
+    return delta, elapsed
+
+
+def _bps_str(delta_bytes, elapsed):
+    """Formats bytes/s into human-readable string, returns rate string (e.g. '1.2 MB/s')."""
+    if elapsed <= 0:
+        return "0 B/s"
+    bps = delta_bytes / elapsed
+    if bps >= 1_000_000:
+        return f"{bps / 1_000_000:.1f} MB/s"
+    if bps >= 1_000:
+        return f"{bps / 1_000:.0f} KB/s"
+    return f"{bps:.0f} B/s"
+
+
 def get_devices():
     """Fetches DHCP static hosts and their block status."""
     # uci show usually requires sudo to read /etc/config/firewall
@@ -74,7 +146,7 @@ def get_devices():
     for section, data in hosts.items():
         name = data.get("name", "")
         if name.startswith(DHCP_PREFIX):
-            mac = data.get("mac", "")
+            mac = data.get("mac", "").lower()
             rule_name = f"block_{sanitize_mac(mac)}"
             if mac:
                 # Run the shell logic as 'veggen', only sudo the uci command
@@ -97,6 +169,43 @@ def get_devices():
                 })
     
     return ctrl_devices
+
+
+def get_all_hosts():
+    """Fetch all network hosts from static DHCP and dynamic leases, deduplicated by MAC."""
+    result = {}
+
+    # 1. Static hosts from uci
+    dhcp_output = run_ssh_command("sudo uci show dhcp")
+    if dhcp_output:
+        hosts = {}
+        for line in dhcp_output.splitlines():
+            match = re.match(r"dhcp\.(@host\[\d+\]|[a-zA-Z0-9_-]+)\.(\w+)='?([^']*)'?", line)
+            if match:
+                section, key, value = match.groups()
+                if section not in hosts:
+                    hosts[section] = {}
+                hosts[section][key] = value
+        for section, data in hosts.items():
+            mac = data.get("mac", "").lower()
+            name = data.get("name", "")
+            ip = data.get("ip", "")
+            if mac and ip:
+                result[mac] = {"name": name, "ip": ip, "mac": mac}
+
+    # 2. Dynamic leases from /tmp/dhcp.leases
+    leases_output = run_ssh_command("cat /tmp/dhcp.leases 2>/dev/null")
+    if leases_output:
+        for line in leases_output.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                # Format: lease_time mac_addr ip_address hostname client_id
+                mac, ip, name = parts[1].lower(), parts[2], parts[3]
+                if mac and ip and mac not in result:
+                    result[mac] = {"name": name if name else "unknown", "ip": ip, "mac": mac}
+
+    return list(result.values())
+
 
 def check_rate_limit():
     """Check if the client IP has exceeded login attempt limits."""
@@ -155,6 +264,11 @@ def index():
 def api_devices():
     return jsonify(get_devices())
 
+@app.route("/api/all-hosts")
+@login_required
+def api_all_hosts():
+    return jsonify(get_all_hosts())
+
 @app.route("/api/toggle", methods=["POST"])
 @login_required
 def toggle_access():
@@ -207,6 +321,191 @@ def toggle_access():
     
     run_ssh_command(full_command)
     return jsonify({"success": True})
+
+
+def _bucket_seconds(period):
+    return {"day": 3600, "week": 86400, "month": 86400, "year": 604800}.get(period, 86400)
+
+
+def _period_cutoff(period):
+    now = time.time()
+    return {
+        "day": now - 86400,
+        "week": now - 604800,
+        "month": now - 2592000,
+        "year": now - 31536000,
+    }.get(period, now - 86400)
+
+
+@app.route("/api/traffic/history")
+@login_required
+def traffic_history():
+    """Returns aggregated traffic history for a device from SQLite."""
+    mac = request.args.get("mac", "").lower()
+    period = request.args.get("period", "day")
+
+    if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
+        return jsonify({"error": "Invalid MAC address"}), 400
+    if period not in ("day", "week", "month", "year"):
+        return jsonify({"error": "Invalid period"}), 400
+
+    cutoff = _period_cutoff(period)
+    bucket_size = _bucket_seconds(period)
+
+    # Query SQLite on router via SSH using python3
+    query = (
+        f"SELECT (ts / {bucket_size}) * {bucket_size} AS bucket_ts, "
+        f"       MAX(bytes_out) - MIN(bytes_out) AS bytes_up, "
+        f"       MAX(bytes_in) - MIN(bytes_in) AS bytes_down "
+        f"FROM mac_traffic "
+        f"WHERE mac = '{mac}' AND ts >= {int(cutoff)} "
+        f"GROUP BY bucket_ts "
+        f"ORDER BY bucket_ts"
+    )
+    raw = run_ssh_command(
+        f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
+        f" [print('|'.join(str(x) for x in r)) for r in db.execute('''{query}''')]\""
+    )
+    if not raw:
+        return jsonify(_empty_history(period, mac))
+
+    buckets = []
+    total_up = 0
+    total_down = 0
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        try:
+            bucket_ts = int(parts[0])
+            bucket_up = max(0, int(parts[1]))
+            bucket_down = max(0, int(parts[2]))
+            buckets.append({"ts": bucket_ts, "up": bucket_up, "down": bucket_down})
+            total_up += bucket_up
+            total_down += bucket_down
+        except (ValueError, IndexError):
+            continue
+
+    if not buckets:
+        return jsonify(_empty_history(period, mac))
+
+    span_days = max((buckets[-1]["ts"] - buckets[0]["ts"]) / 86400, 1)
+    avg_up_per_day = int(total_up / span_days)
+    avg_down_per_day = int(total_down / span_days)
+
+    return jsonify({
+        "period": period,
+        "mac": mac,
+        "total_up": total_up,
+        "total_down": total_down,
+        "avg_up_per_day": avg_up_per_day,
+        "avg_down_per_day": avg_down_per_day,
+        "buckets": buckets,
+    })
+
+
+def _empty_history(period, mac):
+    return {
+        "period": period,
+        "mac": mac,
+        "total_up": 0,
+        "total_down": 0,
+        "avg_up_per_day": 0,
+        "avg_down_per_day": 0,
+        "buckets": [],
+    }
+
+
+@app.route("/api/traffic/batch-history")
+@login_required
+def traffic_batch_history():
+    """Returns total traffic for all MACs in the selected period via one SQLite query."""
+    period = request.args.get("period", "day")
+    if period not in ("day", "week", "month", "year"):
+        return jsonify({"error": "Invalid period"}), 400
+
+    cutoff = _period_cutoff(period)
+    query = (
+        f"SELECT mac, "
+        f"       MAX(bytes_out) - MIN(bytes_out) AS total_up, "
+        f"       MAX(bytes_in) - MIN(bytes_in) AS total_down "
+        f"FROM mac_traffic "
+        f"WHERE ts >= {int(cutoff)} "
+        f"GROUP BY mac"
+    )
+    raw = run_ssh_command(
+        f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
+        f" [print('|'.join(str(x) for x in r)) for r in db.execute('''{query}''')]\""
+    )
+    if not raw:
+        return jsonify({"period": period, "macs": {}})
+
+    macs = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        try:
+            macs[parts[0]] = {
+                "up": max(0, int(parts[1])),
+                "down": max(0, int(parts[2])),
+            }
+        except (ValueError, IndexError):
+            continue
+
+    return jsonify({"period": period, "macs": macs})
+
+
+@app.route("/api/traffic/summary")
+@login_required
+def traffic_summary():
+    """Returns real-time traffic rates for managed devices."""
+    devices = get_devices()
+    managed_macs = {dev["mac"] for dev in devices}
+
+    delta, elapsed = _traffic_delta()
+
+    if elapsed == 0:
+        return jsonify({})
+
+    result = {}
+    all_macs = managed_macs | set(delta.keys())
+    for mac in all_macs:
+        dev_delta = delta.get(mac, {"up": 0, "down": 0})
+        result[mac] = {
+            "up": dev_delta["up"],
+            "down": dev_delta["down"],
+            "up_text": _bps_str(dev_delta["up"], elapsed),
+            "down_text": _bps_str(dev_delta["down"], elapsed),
+        }
+
+    return jsonify(result)
+
+
+@app.route("/api/traffic/debug")
+@login_required
+def traffic_debug():
+    """Debug endpoint to see raw meter data and deltas."""
+    current = _read_meters()
+    delta, elapsed = _traffic_delta()
+    devices = get_devices()
+    managed_macs = {dev["mac"] for dev in devices}
+    return jsonify({
+        "managed_macs": list(managed_macs),
+        "meter_up_keys": list(current["up"].keys())[:5],
+        "meter_down_keys": list(current["down"].keys())[:5],
+        "delta_keys": list(delta.keys())[:5],
+        "delta_sample": dict(list(delta.items())[:2]),
+        "elapsed": elapsed,
+        "prev_ts_age": time.time() - _traffic_ts,
+    })
+
 
 @app.after_request
 def set_security_headers(response):

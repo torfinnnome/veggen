@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Veggen Management</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>
         :root { --pico-spacing: 0.5rem; }
         .status-blocked { color: #d81b60; font-weight: bold; font-size: 0.85em; }
@@ -42,7 +43,8 @@
         .device-row td:first-child {
             padding-left: 1.5rem; /* Indent devices */
         }
-        .device-name { font-weight: 600; line-height: 1.2; }
+        .device-name { font-weight: 600; line-height: 1.2; cursor: pointer; }
+        .device-name:hover { color: var(--pico-primary); }
         .device-meta { 
             font-size: 0.75em; 
             color: var(--pico-muted-color); 
@@ -59,6 +61,72 @@
             font-weight: 600;
         }
         input[role="switch"] { margin-bottom: 0; }
+        .now-cell { font-size: 10px; white-space: nowrap; }
+        .period-pills { display: flex; gap: 6px; margin-bottom: 10px; }
+        .period-pill {
+            padding: 3px 12px;
+            border-radius: 12px;
+            border: 1px solid #d9dce0;
+            background: none;
+            color: #1e293b;
+            font-size: 11px;
+            cursor: pointer;
+            margin: 0;
+            line-height: normal;
+        }
+        .period-pill.active {
+            background: #2563eb;
+            color: #ffffff;
+            border-color: #2563eb;
+        }
+        .detail-stats { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
+        .detail-stats strong { font-weight: 700; }
+        .chart-container { position: relative; height: 200px; width: 100%; }
+        .tab-bar {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--pico-border-color);
+            margin-bottom: 0;
+        }
+        .tab-btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            background: none;
+            font-size: 0.9em;
+            font-weight: 600;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            color: var(--pico-muted-color);
+        }
+        .tab-btn:hover { color: var(--pico-color); }
+        .tab-btn.active {
+            color: var(--pico-primary);
+            border-bottom-color: var(--pico-primary);
+        }
+        .period-select {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+            padding: 0.25rem 0.5rem;
+            width: auto;
+        }
+        .traffic-cell, .traffic-down, .traffic-up {
+            font-size: 10px;
+            white-space: nowrap;
+            color: var(--pico-muted-color);
+        }
+        .sortable-header {
+            cursor: pointer;
+            user-select: none;
+        }
+        .sortable-header:hover {
+            color: var(--pico-primary);
+        }
+        .sortable-header.active-sort {
+            background: var(--pico-primary-background);
+            font-weight: 700;
+        }
     </style>
 </head>
 <body>
@@ -68,23 +136,421 @@
     </nav>
     <main class="container">
         <section id="device-list" aria-busy="true">
-            <div class="loading">Loading...</div>
-            <table id="main-table">
-                <thead>
-                    <tr>
-                        <th>Device</th>
-                        <th style="width: 100px;">Status</th>
-                        <th style="width: 60px;">Action</th>
-                    </tr>
-                </thead>
-                <tbody id="devices-tbody">
-                    <!-- Dynamic content -->
-                </tbody>
-            </table>
+            <select id="period-select" class="period-select" onchange="onPeriodChange()">
+                <option value="day">Day</option>
+                <option value="week">Week</option>
+                <option value="month">Month</option>
+                <option value="year">Year</option>
+            </select>
+            <div class="tab-bar">
+                <button class="tab-btn active" onclick="switchTab('managed')">Managed</button>
+                <button class="tab-btn" onclick="switchTab('allhosts')">All Hosts</button>
+            </div>
+            <div id="managed-tab">
+                <div class="loading">Loading...</div>
+                <table id="main-table">
+                    <thead>
+                        <tr>
+                            <th>Device</th>
+                            <th style="width: 110px;">Now</th>
+                            <th style="width: 150px;">Traffic</th>
+                            <th style="width: 100px;">Status</th>
+                            <th style="width: 60px;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="devices-tbody"></tbody>
+                </table>
+            </div>
+            <div id="allhosts-tab" style="display:none;">
+                <table id="allhosts-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable-header" onclick="sortAllHostsCol(0)">Device</th>
+                            <th class="sortable-header" style="width: 140px;" onclick="sortAllHostsCol(1)">IP</th>
+                            <th class="sortable-header" style="width: 160px;" onclick="sortAllHostsCol(2)">MAC</th>
+                            <th class="sortable-header" style="width: 110px;" onclick="sortAllHostsCol(3)">Now</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortAllHostsCol(4)">Traffic ↓</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortAllHostsCol(5)">Traffic ↑</th>
+                        </tr>
+                    </thead>
+                    <tbody id="allhosts-tbody">
+                        <tr><td colspan="6">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </section>
     </main>
 
     <script>
+        var _detailCache = {};
+        var _currentChart = null;
+
+        function _formatBytes(b) {
+            if (b === 0) return '0 B';
+            var k = 1024;
+            var sizes = ['B','KB','MB','GB','TB'];
+            var i = Math.floor(Math.log(b) / Math.log(k));
+            return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        var _lastTrafficSummary = {};
+
+        async function _pollTrafficSummary() {
+            try {
+                var res = await fetch('/api/traffic/summary');
+                var data = await res.json();
+                _lastTrafficSummary = data;
+                for (var mac in data) {
+                    var speeds = data[mac];
+                    var els = document.querySelectorAll('[data-mac="' + mac + '"]');
+                    els.forEach(function (el) {
+                        if (el.classList.contains('down-speed')) el.textContent = speeds.down_text || '\u2014';
+                        else if (el.classList.contains('up-speed')) el.textContent = speeds.up_text || '\u2014';
+                    });
+                }
+                _updateAllHostsVisibility();
+            } catch (e) { /* non-critical */ }
+        }
+
+        function _updateAllHostsVisibility() {
+            var tbody = document.getElementById('allhosts-tbody');
+            if (!tbody) return;
+            var rows = tbody.querySelectorAll('tr');
+            rows.forEach(function(row) {
+                var macCell = row.querySelector('td:nth-child(3)');
+                if (!macCell) return;
+                var mac = macCell.textContent;
+                var nowCell = row.querySelector('td:nth-child(4)');
+                if (!nowCell) return;
+                if (_lastTrafficSummary[mac]) {
+                    if (!nowCell.querySelector('.down-speed')) {
+                        nowCell.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + mac + '">\u2193 <span class="down-speed" data-mac="' + mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + mac + '">\u2191 <span class="up-speed" data-mac="' + mac + '">\u2014</span></span>';
+                    }
+                } else {
+                    if (nowCell.querySelector('.down-speed')) {
+                        nowCell.innerHTML = '';
+                    }
+                }
+            });
+            setupSpeedClicks();
+        }
+
+        function _createDetailRow(mac) {
+            var row = document.createElement('tr');
+            row.className = 'detail-row';
+            row.setAttribute('data-mac', mac);
+            row.style.display = 'none';
+            var td = document.createElement('td');
+            td.style.padding = '14px 14px 14px 34px';
+            row.appendChild(td);
+            return row;
+        }
+
+        async function _fetchHistory(mac, period) {
+            try {
+                var res = await fetch('/api/traffic/history?mac=' + mac + '&period=' + period);
+                var data = await res.json();
+                _detailCache[mac] = data;
+                return data;
+            } catch (e) {
+                console.error('Error fetching history:', e);
+                return null;
+            }
+        }
+
+        function toggleDetail(dev) {
+            var mac = dev.mac;
+            var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
+            if (!det || det.style.display === 'none') {
+                if (!det) {
+                    var parentTr = dev._parentTr ||
+                        (document.querySelector('.down-speed[data-mac="' + mac + '"]') ||
+                         document.querySelector('[data-mac="' + mac + '"]'))?.closest('tr');
+                    if (!parentTr) return;
+                    det = _createDetailRow(mac);
+                    var colspan = parentTr.parentNode.querySelectorAll('tr:first-child th, tr:first-child td').length || 5;
+                    det.querySelector('td').setAttribute('colspan', colspan);
+                    parentTr.parentNode.insertBefore(det, parentTr.nextSibling);
+                }
+                det.style.display = '';
+                (async function () {
+                    var period = 'day';
+                    var data = _detailCache[mac];
+                    if (!data) data = await _fetchHistory(mac, period);
+                    if (data && data.period) period = data.period;
+                    _renderDetail(mac, data || {}, period);
+                })();
+            } else {
+                det.style.display = 'none';
+            }
+        }
+
+        function _renderDetail(mac, data, period) {
+            var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
+            if (!det) return;
+            var td = det.querySelector('td');
+            td.innerHTML = '';
+            var container = document.createElement('div');
+            var pillsDiv = document.createElement('div');
+            pillsDiv.className = 'period-pills';
+            var periods = ['day', 'week', 'month', 'year'];
+            for (var pi = 0; pi < periods.length; pi++) {
+                (function (p) {
+                    var pill = document.createElement('span');
+                    pill.className = 'period-pill' + (p === period ? ' active' : '');
+                    pill.setAttribute('role', 'button');
+                    pill.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+                    pill.addEventListener('click', function () {
+                        pillsDiv.querySelectorAll('.period-pill').forEach(function (el) { el.classList.remove('active'); });
+                        pill.classList.add('active');
+                        _detailCache[mac] = null;
+                        (async function () {
+                            var d = await _fetchHistory(mac, p);
+                            if (d) _renderDetail(mac, d, p);
+                        })();
+                    });
+                    pillsDiv.appendChild(pill);
+                })(periods[pi]);
+            }
+            container.appendChild(pillsDiv);
+            var statsDiv = document.createElement('div');
+            statsDiv.className = 'detail-stats';
+            var downL = document.createElement('span');
+            downL.innerHTML = '\u2193 <strong>' + _formatBytes(data.total_down || 0) + '</strong>';
+            statsDiv.appendChild(downL);
+            var upL = document.createElement('span');
+            upL.innerHTML = '\u2191 <strong>' + _formatBytes(data.total_up || 0) + '</strong>';
+            statsDiv.appendChild(upL);
+            var avgD = document.createElement('span');
+            avgD.textContent = 'avg ' + _formatBytes(data.avg_down_per_day || 0) + '/day';
+            statsDiv.appendChild(avgD);
+            var avgU = document.createElement('span');
+            avgU.textContent = 'avg ' + _formatBytes(data.avg_up_per_day || 0) + '/day';
+            statsDiv.appendChild(avgU);
+            container.appendChild(statsDiv);
+            var cw = document.createElement('div');
+            cw.className = 'chart-container';
+            var canvas = document.createElement('canvas');
+            cw.appendChild(canvas);
+            container.appendChild(cw);
+            td.appendChild(container);
+            if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
+            if (!data.buckets || data.buckets.length === 0) return;
+            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            var labels = data.buckets.map(function (bk) {
+                var d = new Date(bk.ts * 1000);
+                return months[d.getMonth()] + ' ' + d.getDate();
+            });
+            _currentChart = new Chart(canvas, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Down',
+                            data: data.buckets.map(function (bk) { return bk.down; }),
+                            borderColor: '#1565c0',
+                            backgroundColor: 'rgba(21,101,192,0.35)',
+                            fill: 'origin',
+                            tension: 0.3,
+                            pointRadius: 0,
+                            borderWidth: 1.5
+                        },
+                        {
+                            label: 'Up',
+                            data: data.buckets.map(function (bk) { return -bk.up; }),
+                            borderColor: '#c62828',
+                            backgroundColor: 'rgba(198,40,40,0.35)',
+                            fill: 'origin',
+                            tension: 0.3,
+                            pointRadius: 0,
+                            borderWidth: 1.5
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false } },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { callback: function (v) { return _formatBytes(Math.abs(v)); } }
+                        }
+                    }
+                }
+            });
+        }
+
+        var _batchTraffic = {};
+        var _currentPeriod = 'day';
+        var _allHostsSort = { col: -1, dir: 'desc' };
+
+        function onPeriodChange() {
+            _currentPeriod = document.getElementById('period-select').value;
+            fetchBatchTraffic();
+        }
+
+        async function fetchBatchTraffic() {
+            try {
+                var res = await fetch('/api/traffic/batch-history?period=' + _currentPeriod);
+                var data = await res.json();
+                _batchTraffic = data.macs || {};
+                updateTrafficCells();
+            } catch (e) {
+                console.error('Error fetching batch traffic:', e);
+            }
+        }
+
+        function updateTrafficCells() {
+            document.querySelectorAll('.traffic-down[data-mac]').forEach(function(el) {
+                var mac = el.getAttribute('data-mac');
+                var t = _batchTraffic[mac];
+                el.textContent = (t && t.down > 0) ? _formatBytes(t.down) : '';
+            });
+            document.querySelectorAll('.traffic-up[data-mac]').forEach(function(el) {
+                var mac = el.getAttribute('data-mac');
+                var t = _batchTraffic[mac];
+                el.textContent = (t && t.up > 0) ? _formatBytes(t.up) : '';
+            });
+            document.querySelectorAll('.traffic-cell[data-mac]').forEach(function(el) {
+                var mac = el.getAttribute('data-mac');
+                var t = _batchTraffic[mac];
+                if (t && (t.up > 0 || t.down > 0)) {
+                    el.textContent = '\u2193' + _formatBytes(t.down) + ' + \u2191' + _formatBytes(t.up);
+                } else {
+                    el.textContent = '';
+                }
+            });
+            sortAllHosts();
+        }
+
+        function sortAllHostsCol(col) {
+            if (_allHostsSort.col === col) {
+                if (_allHostsSort.dir === 'desc') _allHostsSort.dir = 'asc';
+                else { _allHostsSort.col = -1; _allHostsSort.dir = 'desc'; }
+            } else {
+                _allHostsSort.col = col;
+                _allHostsSort.dir = 'desc';
+            }
+            sortAllHosts();
+        }
+
+        function _parseBytes(s) {
+            if (!s) return 0;
+            var parts = s.trim().split(/\s+/);
+            if (parts.length < 2) return 0;
+            var val = parseFloat(parts[0]);
+            var unit = parts[1].toUpperCase();
+            var multipliers = { 'B': 1, 'KB': 1024, 'MB': 1048576, 'GB': 1073741824, 'TB': 1099511627776 };
+            return val * (multipliers[unit] || 1);
+        }
+
+        function sortAllHosts() {
+            var tbody = document.getElementById('allhosts-tbody');
+            if (!tbody) return;
+            var rows = Array.from(tbody.querySelectorAll('tr.device-row'));
+            if (rows.length === 0) return;
+            var col = _allHostsSort.col;
+            var dir = _allHostsSort.dir;
+            rows.sort(function(a, b) {
+                var macA = a.querySelector('td:nth-child(3)')?.textContent || '';
+                var macB = b.querySelector('td:nth-child(3)')?.textContent || '';
+                var aVal, bVal;
+                if (col === 0) { aVal = a.querySelector('td:nth-child(1)').textContent; bVal = b.querySelector('td:nth-child(1)').textContent; }
+                else if (col === 1) { aVal = a.querySelector('td:nth-child(2)').textContent; bVal = b.querySelector('td:nth-child(2)').textContent; }
+                else if (col === 2) { aVal = macA; bVal = macB; }
+                else if (col === 3) { var na = a.querySelector('td:nth-child(4)').textContent.trim(); var nb = b.querySelector('td:nth-child(4)').textContent.trim(); aVal = _parseBytes(na); bVal = _parseBytes(nb); }
+                else if (col === 4) { aVal = _batchTraffic[macA]?.down || 0; bVal = _batchTraffic[macB]?.down || 0; }
+                else if (col === 5) { aVal = _batchTraffic[macA]?.up || 0; bVal = _batchTraffic[macB]?.up || 0; }
+                else { aVal = a.querySelector('td:nth-child(1)').textContent; bVal = b.querySelector('td:nth-child(1)').textContent; }
+                var cmp = 0;
+                if (typeof aVal === 'string') cmp = aVal.localeCompare(bVal);
+                else cmp = aVal - bVal;
+                return dir === 'desc' ? -cmp : cmp;
+            });
+            rows.forEach(function(row) { tbody.appendChild(row); });
+            var headers = tbody.parentNode.querySelectorAll('.sortable-header');
+            var baseLabels = ['Device', 'IP', 'MAC', 'Now', 'Traffic \u2193', 'Traffic \u2191'];
+            headers.forEach(function(th, i) {
+                th.textContent = baseLabels[i] || th.textContent;
+                if (_allHostsSort.col === i) th.classList.add('active-sort');
+                else th.classList.remove('active-sort');
+            });
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(function(btn) { btn.classList.remove('active'); });
+            document.querySelector('.tab-btn[onclick="switchTab(\'' + tab + '\')"]').classList.add('active');
+            document.getElementById('managed-tab').style.display = tab === 'managed' ? '' : 'none';
+            document.getElementById('allhosts-tab').style.display = tab === 'allhosts' ? '' : 'none';
+        }
+
+        async function fetchAllHosts() {
+            try {
+                var res = await fetch('/api/all-hosts');
+                var hosts = await res.json();
+                var tbody = document.getElementById('allhosts-tbody');
+                tbody.innerHTML = '';
+                if (hosts.length === 0) {
+                    var row = document.createElement('tr');
+                    var cell = document.createElement('td');
+cell.setAttribute('colspan', '6');
+                    cell.textContent = 'No hosts found.';
+                    row.appendChild(cell);
+                    tbody.appendChild(row);
+                    return;
+                }
+                hosts.forEach(function(host) {
+                    var tr = document.createElement('tr');
+                    tr.className = 'device-row';
+                    var nameTd = document.createElement('td');
+                    nameTd.className = 'device-name';
+                    nameTd.setAttribute('data-mac', host.mac);
+                    nameTd.textContent = host.name;
+                    tr.appendChild(nameTd);
+                    var ipTd = document.createElement('td');
+                    ipTd.textContent = host.ip;
+                    tr.appendChild(ipTd);
+                    var macTd = document.createElement('td');
+                    macTd.textContent = host.mac;
+                    tr.appendChild(macTd);
+                    var nowTd = document.createElement('td');
+                    nowTd.className = 'now-cell';
+                    nowTd.innerHTML = '';
+                    tr.appendChild(nowTd);
+                    var downTd = document.createElement('td');
+                    downTd.className = 'traffic-down';
+                    downTd.setAttribute('data-mac', host.mac);
+                    tr.appendChild(downTd);
+                    var upTd = document.createElement('td');
+                    upTd.className = 'traffic-up';
+                    upTd.setAttribute('data-mac', host.mac);
+                    tr.appendChild(upTd);
+                    tbody.appendChild(tr);
+                    nameTd.addEventListener('click', function() {
+                        toggleDetail({ mac: host.mac, _parentTr: tr });
+                    });
+                    _detailCache[host.mac] = _detailCache[host.mac] || null;
+                });
+                setupSpeedClicks();
+                sortAllHosts();
+            } catch (e) {
+                console.error('Error fetching all hosts:', e);
+            }
+        }
+
+        function setupSpeedClicks() {
+            document.querySelectorAll('.speed-click:not(.bound)').forEach(function(el) {
+                el.classList.add('bound');
+                el.addEventListener('click', function() {
+                    var mac = el.getAttribute('data-mac');
+                    toggleDetail({ mac: mac, _parentTr: el.closest('tr') });
+                });
+            });
+        }
+
         async function fetchDevices() {
             const section = document.getElementById('device-list');
             section.setAttribute('aria-busy', 'true');
@@ -98,7 +564,7 @@
                 if (devices.length === 0) {
                     const emptyRow = document.createElement('tr');
                     const emptyCell = document.createElement('td');
-                    emptyCell.setAttribute('colspan', '3');
+                    emptyCell.setAttribute('colspan', '5');
                     emptyCell.textContent = 'No devices found.';
                     emptyRow.appendChild(emptyCell);
                     tbody.appendChild(emptyRow);
@@ -127,7 +593,7 @@
                     headerRow.appendChild(td1);
 
                     const td2 = document.createElement('td');
-                    td2.setAttribute('colspan', '2');
+                    td2.setAttribute('colspan', '4');
 
                     const batchDiv = document.createElement('div');
                     batchDiv.className = 'batch-control';
@@ -166,6 +632,16 @@
                         nameTd.appendChild(metaDiv);
                         tr.appendChild(nameTd);
 
+                        const nowTd = document.createElement('td');
+                        nowTd.className = 'now-cell';
+                        nowTd.innerHTML = '<span style="color: #1565c0; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2193 <span class="down-speed" data-mac="' + dev.mac + '">\u2014</span></span><br><span style="color: #c62828; cursor:pointer;" class="speed-click" data-mac="' + dev.mac + '">\u2191 <span class="up-speed" data-mac="' + dev.mac + '">\u2014</span></span>';
+                        tr.appendChild(nowTd);
+
+                        const trafficTd = document.createElement('td');
+                        trafficTd.className = 'traffic-cell';
+                        trafficTd.setAttribute('data-mac', dev.mac);
+                        tr.appendChild(trafficTd);
+
                         const statusTd = document.createElement('td');
                         const statusSpan = document.createElement('span');
                         statusSpan.className = dev.blocked ? 'status-blocked' : 'status-online';
@@ -186,6 +662,10 @@
                         actionTd.appendChild(devCheckbox);
                         tr.appendChild(actionTd);
                         tbody.appendChild(tr);
+                        nameDiv.addEventListener('click', function () {
+                            toggleDetail(Object.assign({}, dev, { _parentTr: tr }));
+                        });
+                        _detailCache[dev.mac] = _detailCache[dev.mac] || null;
                     });
                 }
             } catch (error) {
@@ -227,6 +707,11 @@
         }
 
         fetchDevices();
+        fetchAllHosts();
+        _pollTrafficSummary();
+        fetchBatchTraffic();
+        setInterval(_pollTrafficSummary, 15000);
+        setTimeout(function() { setupSpeedClicks(); }, 100);
     </script>
 </body>
 </html>

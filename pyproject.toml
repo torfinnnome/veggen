@@ -1,0 +1,8 @@
+[project]
+name = "veggen"
+version = "0.1.0"
+description = "OpenWrt router management dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "flask==3.1.3",
+]

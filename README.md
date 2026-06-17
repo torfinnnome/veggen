@@ -14,7 +14,7 @@ A simple web application to manage internet access for selected devices on an Op
 - **SSH Access**: Passwordless SSH access must be configured from the machine running this app to the router's `veggen` user.
 - **Python 3**: Installed on the host machine.
 
-## Setup Router Security
+## Setup Router
 To avoid running the app as `root`, create a restricted `veggen` user on your router:
 
 1. SSH into your router as `root`.
@@ -35,17 +35,63 @@ To avoid running the app as `root`, create a restricted `veggen` user on your ro
    ```
 5. Configure `sudo` permissions by running `visudo` and adding:
    ```text
-   veggen ALL=(ALL) NOPASSWD: /sbin/uci, /usr/sbin/nft, /etc/init.d/firewall
-   ```
+    veggen ALL=(ALL) NOPASSWD: /sbin/uci, /usr/sbin/nft, /etc/init.d/firewall
+    ```
+
+### DHCP Host Configuration
+
+Devices to manage must be configured as static DHCP hosts with a name starting with `veggen-`. Format: `veggen-<kid>-<device-name>` (e.g., `veggen-olaf-iphone`).
+
+```bash
+uci set dhcp.olaf_iphone='host'
+uci set dhcp.olaf_iphone.name='veggen-olaf-iphone'
+uci set dhcp.olaf_iphone.ip='192.168.0.101'
+uci set dhcp.olaf_iphone.mac='aa:bb:cc:dd:ee:ff'
+uci commit dhcp
+/etc/init.d/dhcp restart
+```
 
 ## Setup & Run
 1. Install dependencies and run the application:
-   ```bash
-   uv run app.py
-   ```
+    ```bash
+    uv run app.py
+    ```
 
 2. Access the web interface:
-   Open your browser and navigate to `http://localhost:5000`.
+    Open your browser and navigate to `http://localhost:5000`.
+
+## Traffic Accounting (Optional)
+
+Track per-device bandwidth usage with real-time speeds and historical charts.
+
+### Deploy to Router
+
+1. Generate the setup script:
+   ```bash
+   python3 deploy_router.py > setup.sh
+   ```
+
+2. SSH into your router as `root` and paste the contents:
+   ```bash
+   ssh root@192.168.0.1 'sh -s' < setup.sh
+   ```
+
+This does the following (idempotent — safe to rerun):
+- Creates nft meters for outbound/inbound traffic per MAC
+- Deploys `parse_meters.py` snapshot script to `/usr/share/veggen/`
+- Creates `/etc/veggen/traffic.db` SQLite database
+- Adds cron job (every 5 minutes) to `/etc/crontabs/root`
+- Adds `firewall.user` hook so meters survive firewall reloads
+
+### First Snapshot
+
+The cron will begin collecting data automatically. To take an immediate snapshot:
+
+```bash
+ssh veggen@192.168.0.1 "/usr/share/veggen/traffic-snapshot.sh"
+```
+
+Wait ~15 minutes for data points to accumulate, then refresh the dashboard.
 
 ## How it works
 - **Fetching**: The app runs `uci show dhcp` via SSH to find hosts with the configured prefix.
