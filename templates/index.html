@@ -78,6 +78,28 @@
         .detail-stats { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
         .detail-stats strong { font-weight: 700; }
         .chart-container { position: relative; height: 200px; width: 100%; }
+        .tab-bar {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--pico-border-color);
+            margin-bottom: 0;
+        }
+        .tab-btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            background: none;
+            font-size: 0.9em;
+            font-weight: 600;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            color: var(--pico-muted-color);
+        }
+        .tab-btn:hover { color: var(--pico-color); }
+        .tab-btn.active {
+            color: var(--pico-primary);
+            border-bottom-color: var(--pico-primary);
+        }
     </style>
 </head>
 <body>
@@ -87,20 +109,39 @@
     </nav>
     <main class="container">
         <section id="device-list" aria-busy="true">
-            <div class="loading">Loading...</div>
-            <table id="main-table">
-                <thead>
-                    <tr>
-                        <th>Device</th>
-                        <th style="width: 110px;">Now</th>
-                        <th style="width: 100px;">Status</th>
-                        <th style="width: 60px;">Action</th>
-                    </tr>
-                </thead>
-                <tbody id="devices-tbody">
-                    <!-- Dynamic content -->
-                </tbody>
-            </table>
+            <div class="tab-bar">
+                <button class="tab-btn active" onclick="switchTab('managed')">Managed</button>
+                <button class="tab-btn" onclick="switchTab('allhosts')">All Hosts</button>
+            </div>
+            <div id="managed-tab">
+                <div class="loading">Loading...</div>
+                <table id="main-table">
+                    <thead>
+                        <tr>
+                            <th>Device</th>
+                            <th style="width: 110px;">Now</th>
+                            <th style="width: 100px;">Status</th>
+                            <th style="width: 60px;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="devices-tbody"></tbody>
+                </table>
+            </div>
+            <div id="allhosts-tab" style="display:none;">
+                <table id="allhosts-table">
+                    <thead>
+                        <tr>
+                            <th>Device</th>
+                            <th style="width: 140px;">IP</th>
+                            <th style="width: 160px;">MAC</th>
+                            <th style="width: 110px;">Now</th>
+                        </tr>
+                    </thead>
+                    <tbody id="allhosts-tbody">
+                        <tr><td colspan="4">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </section>
     </main>
 
@@ -254,6 +295,52 @@
             });
         }
 
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(function(btn) { btn.classList.remove('active'); });
+            document.querySelector('.tab-btn[onclick="switchTab(\'' + tab + '\')"]').classList.add('active');
+            document.getElementById('managed-tab').style.display = tab === 'managed' ? '' : 'none';
+            document.getElementById('allhosts-tab').style.display = tab === 'allhosts' ? '' : 'none';
+        }
+
+        async function fetchAllHosts() {
+            try {
+                var res = await fetch('/api/all-hosts');
+                var hosts = await res.json();
+                var tbody = document.getElementById('allhosts-tbody');
+                tbody.innerHTML = '';
+                if (hosts.length === 0) {
+                    var row = document.createElement('tr');
+                    var cell = document.createElement('td');
+                    cell.setAttribute('colspan', '4');
+                    cell.textContent = 'No hosts found.';
+                    row.appendChild(cell);
+                    tbody.appendChild(row);
+                    return;
+                }
+                hosts.forEach(function(host) {
+                    var tr = document.createElement('tr');
+                    tr.className = 'device-row';
+                    var nameTd = document.createElement('td');
+                    nameTd.textContent = host.name;
+                    tr.appendChild(nameTd);
+                    var ipTd = document.createElement('td');
+                    ipTd.textContent = host.ip;
+                    tr.appendChild(ipTd);
+                    var macTd = document.createElement('td');
+                    macTd.textContent = host.mac;
+                    tr.appendChild(macTd);
+                    var nowTd = document.createElement('td');
+                    nowTd.className = 'now-cell';
+                    nowTd.innerHTML = '<span style="color: #1565c0;">\u2193 <span class="down-speed" data-mac="' + host.mac + '">\u2014</span></span><br><span style="color: #c62828;">\u2191 <span class="up-speed" data-mac="' + host.mac + '">\u2014</span></span>';
+                    tr.appendChild(nowTd);
+                    tbody.appendChild(tr);
+                    _detailCache[host.mac] = _detailCache[host.mac] || null;
+                });
+            } catch (e) {
+                console.error('Error fetching all hosts:', e);
+            }
+        }
+
         async function fetchDevices() {
             const section = document.getElementById('device-list');
             section.setAttribute('aria-busy', 'true');
@@ -405,6 +492,7 @@
         }
 
         fetchDevices();
+        fetchAllHosts();
         _pollTrafficSummary();
         setInterval(_pollTrafficSummary, 15000);
     </script>
