@@ -116,6 +116,13 @@
             white-space: nowrap;
             color: var(--pico-muted-color);
         }
+        .sortable-header {
+            cursor: pointer;
+            user-select: none;
+        }
+        .sortable-header:hover {
+            color: var(--pico-primary);
+        }
     </style>
 </head>
 <body>
@@ -158,7 +165,7 @@
                             <th style="width: 140px;">IP</th>
                             <th style="width: 160px;">MAC</th>
                             <th style="width: 110px;">Now</th>
-                            <th style="width: 150px;">Traffic</th>
+                            <th class="sortable-header" style="width: 150px;" onclick="cycleTrafficSort()">Traffic</th>
                         </tr>
                     </thead>
                     <tbody id="allhosts-tbody">
@@ -350,6 +357,7 @@
 
         var _batchTraffic = {};
         var _currentPeriod = 'day';
+        var _allHostsSort = 'name';
 
         function onPeriodChange() {
             _currentPeriod = document.getElementById('period-select').value;
@@ -377,6 +385,38 @@
                     el.textContent = '';
                 }
             });
+            sortAllHosts();
+        }
+
+        function cycleTrafficSort() {
+            if (_allHostsSort === 'name') _allHostsSort = 'traffic-desc';
+            else if (_allHostsSort === 'traffic-desc') _allHostsSort = 'traffic-asc';
+            else _allHostsSort = 'name';
+            sortAllHosts();
+        }
+
+        function sortAllHosts() {
+            var tbody = document.getElementById('allhosts-tbody');
+            if (!tbody) return;
+            var rows = Array.from(tbody.querySelectorAll('tr.device-row'));
+            if (rows.length === 0) return;
+            rows.sort(function(a, b) {
+                var macA = a.querySelector('td:nth-child(3)').textContent;
+                var macB = b.querySelector('td:nth-child(3)').textContent;
+                var nameA = a.querySelector('td:nth-child(1)').textContent;
+                var nameB = b.querySelector('td:nth-child(1)').textContent;
+                if (_allHostsSort === 'name') return nameA.localeCompare(nameB);
+                var totalA = _batchTraffic[macA] ? _batchTraffic[macA].up + _batchTraffic[macA].down : 0;
+                var totalB = _batchTraffic[macB] ? _batchTraffic[macB].up + _batchTraffic[macB].down : 0;
+                return _allHostsSort === 'traffic-desc' ? totalB - totalA : totalA - totalB;
+            });
+            rows.forEach(function(row) { tbody.appendChild(row); });
+            var th = document.querySelector('#allhosts-table .sortable-header');
+            if (th) {
+                if (_allHostsSort === 'traffic-desc') th.textContent = 'Traffic \u2193';
+                else if (_allHostsSort === 'traffic-asc') th.textContent = 'Traffic \u2191';
+                else th.textContent = 'Traffic';
+            }
         }
 
         function switchTab(tab) {
@@ -430,6 +470,7 @@
                     _detailCache[host.mac] = _detailCache[host.mac] || null;
                 });
                 setupSpeedClicks();
+                sortAllHosts();
             } catch (e) {
                 console.error('Error fetching all hosts:', e);
             }
