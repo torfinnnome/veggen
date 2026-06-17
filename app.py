@@ -419,6 +419,49 @@ def _empty_history(period, mac):
     }
 
 
+@app.route("/api/traffic/batch-history")
+@login_required
+def traffic_batch_history():
+    """Returns total traffic for all MACs in the selected period via one SQLite query."""
+    period = request.args.get("period", "day")
+    if period not in ("day", "week", "month", "year"):
+        return jsonify({"error": "Invalid period"}), 400
+
+    cutoff = _period_cutoff(period)
+    query = (
+        f"SELECT mac, "
+        f"       MAX(bytes_out) - MIN(bytes_out) AS total_up, "
+        f"       MAX(bytes_in) - MIN(bytes_in) AS total_down "
+        f"FROM mac_traffic "
+        f"WHERE ts >= {int(cutoff)} "
+        f"GROUP BY mac"
+    )
+    raw = run_ssh_command(
+        f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
+        f" [print('|'.join(str(x) for x in r)) for r in db.execute('''{query}''')]\""
+    )
+    if not raw:
+        return jsonify({"period": period, "macs": {}})
+
+    macs = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        try:
+            macs[parts[0]] = {
+                "up": max(0, int(parts[1])),
+                "down": max(0, int(parts[2])),
+            }
+        except (ValueError, IndexError):
+            continue
+
+    return jsonify({"period": period, "macs": macs})
+
+
 @app.route("/api/traffic/summary")
 @login_required
 def traffic_summary():
