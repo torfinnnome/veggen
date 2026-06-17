@@ -260,8 +260,9 @@
             var periods = ['day', 'week', 'month', 'year'];
             for (var pi = 0; pi < periods.length; pi++) {
                 (function (p) {
-                    var pill = document.createElement('button');
+                    var pill = document.createElement('span');
                     pill.className = 'period-pill' + (p === period ? ' active' : '');
+                    pill.setAttribute('role', 'button');
                     pill.textContent = p.charAt(0).toUpperCase() + p.slice(1);
                     pill.addEventListener('click', function () {
                         pillsDiv.querySelectorAll('.period-pill').forEach(function (el) { el.classList.remove('active'); });
