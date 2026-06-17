@@ -10,17 +10,30 @@ Then pipe to router: ssh root@router 'sh -s' < setup.sh
 
 NFT_INIT_SH = r"""#!/bin/sh
 # veggen nft accounting - re-created on each firewall reload
-# Detect LAN interface from uci config, fallback to br-lan
-LAN_IF=$(uci -q get network.lan.device 2>/dev/null || echo "br-lan")
-LAN_IF=$(echo "$LAN_IF" | tr -d '"')
-[ -z "$LAN_IF" ] && LAN_IF="br-lan"
-/usr/sbin/nft list meter inet fw4 mac_outbound_traffic >/dev/null 2>&1 || \
-  /usr/sbin/nft add rule inet fw4 forward \
-    iifname "$LAN_IF" \
+# Detect all LAN interfaces: bridge + wireless members
+LAN_IFS=$(uci -q get network.lan.device 2>/dev/null | tr -d '"')
+[ -z "$LAN_IFS" ] && LAN_IFS="br-lan"
+# Add wireless members of the bridge (e.g. wt0)
+for iface in $(brctl show 2>/dev/null | tail -n+3 | awk '{print $2}' | grep -v "^$"); do
+    if ! echo "$LAN_IFS" | grep -qw "$iface"; then
+        LAN_IFS="$LAN_IFS,$iface"
+    fi
+done
+IFS=',' read -ra IF_ARR <<< "$LAN_IFS"
+IF_SET=""
+for i in "${!IF_ARR[@]}"; do
+    [ $i -gt 0 ] && IF_SET="$IF_SET, "
+    IF_SET="$IF_SET\"${IF_ARR[$i]}\""
+done
+# Remove old rules if they exist (to avoid duplicates on reload)
+/usr/sbin/nft -a list chain inet fw4 forward 2>/dev/null | grep mac_outbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
+/usr/sbin/nft -a list chain inet fw4 forward 2>/dev/null | grep mac_inbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
+# Insert at top so they see all traffic before any accept/drop rules
+/usr/sbin/nft insert rule inet fw4 forward \
+    iifname { $IF_SET } \
     meter mac_outbound_traffic { ether saddr counter }
-/usr/sbin/nft list meter inet fw4 mac_inbound_traffic >/dev/null 2>&1 || \
-  /usr/sbin/nft add rule inet fw4 forward \
-    oifname "$LAN_IF" \
+/usr/sbin/nft insert rule inet fw4 forward \
+    oifname { $IF_SET } \
     meter mac_inbound_traffic { ether daddr counter }
 """
 
