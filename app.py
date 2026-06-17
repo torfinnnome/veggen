@@ -61,7 +61,7 @@ def sanitize_mac(mac):
 
 def _parse_meter(name):
     """Runs nft list meter and returns {mac: bytes} for each entry."""
-    output = run_ssh_command(f'nft list meter inet fw4 {name} 2>/dev/null')
+    output = run_ssh_command(f'/usr/sbin/nft list meter inet fw4 {name} 2>/dev/null')
     result = {}
     for line in output.splitlines():
         match = re.match(r'([0-9a-f:]+) counter packets \d+ bytes (\d+)', line)
