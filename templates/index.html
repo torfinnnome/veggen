@@ -123,6 +123,10 @@
         .sortable-header:hover {
             color: var(--pico-primary);
         }
+        .sortable-header.active-sort {
+            background: var(--pico-primary-background);
+            font-weight: 700;
+        }
     </style>
 </head>
 <body>
@@ -259,9 +263,9 @@
             var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
             if (!det || det.style.display === 'none') {
                 if (!det) {
-                    var speedEl = document.querySelector('.down-speed[data-mac="' + mac + '"]');
-                    var parentTr = speedEl ? speedEl.closest('tr') :
-                        document.querySelector('[data-mac="' + mac + '"]')?.closest('tr');
+                    var parentTr = dev._parentTr ||
+                        (document.querySelector('.down-speed[data-mac="' + mac + '"]') ||
+                         document.querySelector('[data-mac="' + mac + '"]'))?.closest('tr');
                     if (!parentTr) return;
                     det = _createDetailRow(mac);
                     var colspan = parentTr.parentNode.querySelectorAll('tr:first-child th, tr:first-child td').length || 5;
@@ -446,9 +450,11 @@
             });
             rows.forEach(function(row) { tbody.appendChild(row); });
             var headers = tbody.parentNode.querySelectorAll('.sortable-header');
+            var baseLabels = ['Device', 'IP', 'MAC', 'Now', 'Traffic \u2193', 'Traffic \u2191'];
             headers.forEach(function(th, i) {
-                var base = th.textContent.replace(/\s*[\u2191\u2193]\s*$/, '');
-                th.textContent = _allHostsSort.col === i ? base + ' ' + (dir === 'desc' ? '\u2193' : '\u2191') : base;
+                th.textContent = baseLabels[i] || th.textContent;
+                if (_allHostsSort.col === i) th.classList.add('active-sort');
+                else th.classList.remove('active-sort');
             });
         }
 
@@ -502,7 +508,7 @@ cell.setAttribute('colspan', '6');
                     tr.appendChild(upTd);
                     tbody.appendChild(tr);
                     nameTd.addEventListener('click', function() {
-                        toggleDetail({ mac: host.mac });
+                        toggleDetail({ mac: host.mac, _parentTr: tr });
                     });
                     _detailCache[host.mac] = _detailCache[host.mac] || null;
                 });
@@ -518,7 +524,7 @@ cell.setAttribute('colspan', '6');
                 el.classList.add('bound');
                 el.addEventListener('click', function() {
                     var mac = el.getAttribute('data-mac');
-                    toggleDetail({ mac: mac });
+                    toggleDetail({ mac: mac, _parentTr: el.closest('tr') });
                 });
             });
         }
@@ -635,7 +641,7 @@ cell.setAttribute('colspan', '6');
                         tr.appendChild(actionTd);
                         tbody.appendChild(tr);
                         nameDiv.addEventListener('click', function () {
-                            toggleDetail(dev);
+                            toggleDetail(Object.assign({}, dev, { _parentTr: tr }));
                         });
                         _detailCache[dev.mac] = _detailCache[dev.mac] || null;
                     });
