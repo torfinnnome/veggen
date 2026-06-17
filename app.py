@@ -146,7 +146,7 @@ def get_devices():
     for section, data in hosts.items():
         name = data.get("name", "")
         if name.startswith(DHCP_PREFIX):
-            mac = data.get("mac", "")
+            mac = data.get("mac", "").lower()
             rule_name = f"block_{sanitize_mac(mac)}"
             if mac:
                 # Run the shell logic as 'veggen', only sudo the uci command
@@ -440,6 +440,25 @@ def traffic_summary():
         }
 
     return jsonify(result)
+
+
+@app.route("/api/traffic/debug")
+@login_required
+def traffic_debug():
+    """Debug endpoint to see raw meter data and deltas."""
+    current = _read_meters()
+    delta, elapsed = _traffic_delta()
+    devices = get_devices()
+    managed_macs = {dev["mac"] for dev in devices}
+    return jsonify({
+        "managed_macs": list(managed_macs),
+        "meter_up_keys": list(current["up"].keys())[:5],
+        "meter_down_keys": list(current["down"].keys())[:5],
+        "delta_keys": list(delta.keys())[:5],
+        "delta_sample": dict(list(delta.items())[:2]),
+        "elapsed": elapsed,
+        "prev_ts_age": time.time() - _traffic_ts,
+    })
 
 
 @app.after_request
