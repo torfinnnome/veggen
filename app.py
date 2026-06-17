@@ -170,6 +170,43 @@ def get_devices():
     
     return ctrl_devices
 
+
+def get_all_hosts():
+    """Fetch all network hosts from static DHCP and dynamic leases, deduplicated by MAC."""
+    result = {}
+
+    # 1. Static hosts from uci
+    dhcp_output = run_ssh_command("sudo uci show dhcp")
+    if dhcp_output:
+        hosts = {}
+        for line in dhcp_output.splitlines():
+            match = re.match(r"dhcp\.(@host\[\d+\]|[a-zA-Z0-9_-]+)\.(\w+)='?([^']*)'?", line)
+            if match:
+                section, key, value = match.groups()
+                if section not in hosts:
+                    hosts[section] = {}
+                hosts[section][key] = value
+        for section, data in hosts.items():
+            mac = data.get("mac", "").lower()
+            name = data.get("name", "")
+            ip = data.get("ip", "")
+            if mac and ip:
+                result[mac] = {"name": name, "ip": ip, "mac": mac}
+
+    # 2. Dynamic leases from /tmp/dhcp.leases
+    leases_output = run_ssh_command("cat /tmp/dhcp.leases 2>/dev/null")
+    if leases_output:
+        for line in leases_output.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                # Format: expiry ip mac name hostname
+                ip, mac, name = parts[1], parts[2].lower(), parts[3]
+                if mac and ip and mac not in result:
+                    result[mac] = {"name": name if name else "unknown", "ip": ip, "mac": mac}
+
+    return list(result.values())
+
+
 def check_rate_limit():
     """Check if the client IP has exceeded login attempt limits."""
     client_ip = request.remote_addr or "unknown"
@@ -226,6 +263,11 @@ def index():
 @login_required
 def api_devices():
     return jsonify(get_devices())
+
+@app.route("/api/all-hosts")
+@login_required
+def api_all_hosts():
+    return jsonify(get_all_hosts())
 
 @app.route("/api/toggle", methods=["POST"])
 @login_required
