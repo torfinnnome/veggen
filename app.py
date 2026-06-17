@@ -352,7 +352,7 @@ def traffic_history():
     cutoff = _period_cutoff(period)
     bucket_size = _bucket_seconds(period)
 
-    # Query SQLite on router via SSH for aggregated data
+    # Query SQLite on router via SSH using python3
     query = (
         f"SELECT (ts / {bucket_size}) * {bucket_size} AS bucket_ts, "
         f"       MAX(bytes_out) - MIN(bytes_out) AS bytes_up, "
@@ -362,7 +362,10 @@ def traffic_history():
         f"GROUP BY bucket_ts "
         f"ORDER BY bucket_ts"
     )
-    raw = run_ssh_command(f"sqlite3 -separator '|' /etc/veggen/traffic.db '{query}' 2>/dev/null")
+    raw = run_ssh_command(
+        f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
+        f" [print('|'.join(str(x) for x in r)) for r in db.execute('''{query}''')]\""
+    )
     if not raw:
         return jsonify(_empty_history(period, mac))
 
