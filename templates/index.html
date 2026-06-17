@@ -99,7 +99,7 @@
             margin-bottom: -2px;
             color: var(--pico-muted-color);
         }
-        .tab-btn:hover { color: var(--pico-color); }
+        .tab-btn:hover { color: #1e293b; }
         .tab-btn.active {
             color: var(--pico-primary);
             border-bottom-color: var(--pico-primary);
@@ -402,6 +402,23 @@
             sortAllHosts();
         }
 
+        function _naturalCompare(a, b) {
+            if (a === b) return 0;
+            var xA = a.split(/(\d+)/).filter(Boolean);
+            var xB = b.split(/(\d+)/).filter(Boolean);
+            var len = Math.min(xA.length, xB.length);
+            for (var i = 0; i < len; i++) {
+                var sA = xA[i], sB = xB[i];
+                if (sA === sB) continue;
+                var nA = parseInt(sA, 10), nB = parseInt(sB, 10);
+                if (!isNaN(nA) && !isNaN(nB)) {
+                    if (nA !== nB) return nA - nB;
+                }
+                return sA < sB ? -1 : 1;
+            }
+            return xA.length - xB.length;
+        }
+
         function sortAllHosts() {
             var tbody = document.getElementById('allhosts-tbody');
             if (!tbody) return;
@@ -420,7 +437,7 @@
                 else if (col === 4) { aVal = _batchTraffic[macA]?.up || 0; bVal = _batchTraffic[macB]?.up || 0; }
                 else { aVal = a.querySelector('td:nth-child(1)').textContent; bVal = b.querySelector('td:nth-child(1)').textContent; }
                 var cmp = 0;
-                if (typeof aVal === 'string') cmp = aVal.localeCompare(bVal);
+                if (typeof aVal === 'string') cmp = _naturalCompare(aVal, bVal);
                 else cmp = aVal - bVal;
                 return dir === 'desc' ? -cmp : cmp;
             });
