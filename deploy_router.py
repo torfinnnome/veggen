@@ -15,16 +15,10 @@ LAN_IFS=$(uci -q get network.lan.device 2>/dev/null | tr -d '"')
 [ -z "$LAN_IFS" ] && LAN_IFS="br-lan"
 # Add wireless members of the bridge (e.g. wt0)
 for iface in $(brctl show 2>/dev/null | tail -n+3 | awk '{print $2}' | grep -v "^$"); do
-    if ! echo "$LAN_IFS" | grep -qw "$iface"; then
-        LAN_IFS="$LAN_IFS,$iface"
-    fi
+    echo "$LAN_IFS" | grep -qw "$iface" || LAN_IFS="$LAN_IFS,$iface"
 done
-IFS=',' read -ra IF_ARR <<< "$LAN_IFS"
-IF_SET=""
-for i in "${!IF_ARR[@]}"; do
-    [ $i -gt 0 ] && IF_SET="$IF_SET, "
-    IF_SET="$IF_SET\"${IF_ARR[$i]}\""
-done
+# Build nft set literal: "br-lan", "wt0"
+IF_SET=$(echo "$LAN_IFS" | tr ',' '\n' | sed 's/.*/"&"/' | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
 # Remove old rules if they exist (to avoid duplicates on reload)
 /usr/sbin/nft -a list chain inet fw4 forward 2>/dev/null | grep mac_outbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
 /usr/sbin/nft -a list chain inet fw4 forward 2>/dev/null | grep mac_inbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
