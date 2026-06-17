@@ -14,7 +14,7 @@ NFT_INIT_SH = r"""#!/bin/sh
 LAN_IFS=$(uci -q get network.lan.device 2>/dev/null | tr -d '"')
 [ -z "$LAN_IFS" ] && LAN_IFS="br-lan"
 # Add wireless members of the bridge (e.g. wt0)
-for iface in $(brctl show 2>/dev/null | tail -n+3 | awk '{print $2}' | grep -v "^$"); do
+for iface in $(brctl show 2>/dev/null | tail -n+3 | awk '{for(i=4;i<=NF;i++) print $i}' | grep -v "^$"); do
     echo "$LAN_IFS" | grep -qw "$iface" || LAN_IFS="$LAN_IFS,$iface"
 done
 # Build nft set literal: "br-lan", "wt0"
