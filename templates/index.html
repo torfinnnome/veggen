@@ -337,16 +337,35 @@
             if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
             if (!data.buckets || data.buckets.length === 0) return;
             var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            var labels = data.buckets.map(function (bk) {
+                var d = new Date(bk.ts * 1000);
+                return months[d.getMonth()] + ' ' + d.getDate();
+            });
             _currentChart = new Chart(canvas, {
-                type: 'bar',
+                type: 'line',
                 data: {
-                    labels: data.buckets.map(function (bk) {
-                        var d = new Date(bk.ts * 1000);
-                        return months[d.getMonth()] + ' ' + d.getDate();
-                    }),
+                    labels: labels,
                     datasets: [
-                        { label: 'Down', data: data.buckets.map(function (bk) { return bk.down; }), backgroundColor: '#1565c0' },
-                        { label: 'Up', data: data.buckets.map(function (bk) { return bk.up; }), backgroundColor: '#c62828' }
+                        {
+                            label: 'Down',
+                            data: data.buckets.map(function (bk) { return bk.down; }),
+                            borderColor: '#1565c0',
+                            backgroundColor: 'rgba(21,101,192,0.35)',
+                            fill: 'origin',
+                            tension: 0.3,
+                            pointRadius: 0,
+                            borderWidth: 1.5
+                        },
+                        {
+                            label: 'Up',
+                            data: data.buckets.map(function (bk) { return -bk.up; }),
+                            borderColor: '#c62828',
+                            backgroundColor: 'rgba(198,40,40,0.35)',
+                            fill: 'origin',
+                            tension: 0.3,
+                            pointRadius: 0,
+                            borderWidth: 1.5
+                        }
                     ]
                 },
                 options: {
@@ -354,8 +373,11 @@
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: { stacked: false, grid: { display: false } },
-                        y: { beginAtZero: true, ticks: { callback: function (v) { return _formatBytes(v); } } }
+                        x: { grid: { display: false } },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { callback: function (v) { return _formatBytes(Math.abs(v)); } }
+                        }
                     }
                 }
             });
