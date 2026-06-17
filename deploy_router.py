@@ -10,13 +10,17 @@ Then pipe to router: ssh root@router 'sh -s' < setup.sh
 
 NFT_INIT_SH = r"""#!/bin/sh
 # veggen nft accounting - re-created on each firewall reload
+# Detect LAN interface from uci config, fallback to br-lan
+LAN_IF=$(uci -q get network.lan.device 2>/dev/null || echo "br-lan")
+LAN_IF=$(echo "$LAN_IF" | tr -d '"')
+[ -z "$LAN_IF" ] && LAN_IF="br-lan"
 /usr/sbin/nft list meter inet fw4 mac_outbound_traffic >/dev/null 2>&1 || \
   /usr/sbin/nft add rule inet fw4 forward \
-    iifname {"br-lan","wt0"} \
+    iifname "$LAN_IF" \
     meter mac_outbound_traffic { ether saddr counter }
 /usr/sbin/nft list meter inet fw4 mac_inbound_traffic >/dev/null 2>&1 || \
   /usr/sbin/nft add rule inet fw4 forward \
-    oifname {"br-lan","wt0"} \
+    oifname "$LAN_IF" \
     meter mac_inbound_traffic { ether daddr counter }
 """
 

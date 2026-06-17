@@ -68,7 +68,7 @@ def _parse_meter(name):
         if match:
             mac, bytes_str = match.groups()
             if mac != "ff:ff:ff:ff:ff:ff":
-                result[mac] = int(bytes_str)
+                result[mac.lower()] = int(bytes_str)
     return result
 
 
@@ -199,8 +199,8 @@ def get_all_hosts():
         for line in leases_output.splitlines():
             parts = line.split()
             if len(parts) >= 4:
-                # Format: expiry ip mac name hostname
-                ip, mac, name = parts[1], parts[2].lower(), parts[3]
+                # Format: lease_time mac_addr ip_address hostname client_id
+                mac, ip, name = parts[1].lower(), parts[2], parts[3]
                 if mac and ip and mac not in result:
                     result[mac] = {"name": name if name else "unknown", "ip": ip, "mac": mac}
 
@@ -429,7 +429,8 @@ def traffic_summary():
         return jsonify({})
 
     result = {}
-    for mac in managed_macs:
+    all_macs = managed_macs | set(delta.keys())
+    for mac in all_macs:
         dev_delta = delta.get(mac, {"up": 0, "down": 0})
         result[mac] = {
             "up": dev_delta["up"],

@@ -229,8 +229,9 @@
             if (!det || det.style.display === 'none') {
                 if (!det) {
                     var speedEl = document.querySelector('.down-speed[data-mac="' + mac + '"]');
-                    if (!speedEl) return;
-                    var parentTr = speedEl.closest('tr');
+                    var parentTr = speedEl ? speedEl.closest('tr') :
+                        document.querySelector('[data-mac="' + mac + '"]')?.closest('tr');
+                    if (!parentTr) return;
                     det = _createDetailRow(mac);
                     parentTr.parentNode.insertBefore(det, parentTr.nextSibling);
                 }
@@ -348,6 +349,8 @@
                     var tr = document.createElement('tr');
                     tr.className = 'device-row';
                     var nameTd = document.createElement('td');
+                    nameTd.className = 'device-name';
+                    nameTd.setAttribute('data-mac', host.mac);
                     nameTd.textContent = host.name;
                     tr.appendChild(nameTd);
                     var ipTd = document.createElement('td');
@@ -361,6 +364,9 @@
                     nowTd.innerHTML = '';
                     tr.appendChild(nowTd);
                     tbody.appendChild(tr);
+                    nameTd.addEventListener('click', function() {
+                        toggleDetail({ mac: host.mac });
+                    });
                     _detailCache[host.mac] = _detailCache[host.mac] || null;
                 });
                 setupSpeedClicks();
