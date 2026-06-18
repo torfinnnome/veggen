@@ -324,7 +324,7 @@ def toggle_access():
 
 
 def _bucket_seconds(period):
-    return {"day": 3600, "week": 86400, "month": 86400, "year": 604800}.get(period, 86400)
+    return {"day": 900, "week": 86400, "month": 86400, "year": 604800}.get(period, 86400)
 
 
 def _period_cutoff(period):
