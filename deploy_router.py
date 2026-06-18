@@ -9,7 +9,7 @@ Then pipe to router: ssh root@router 'sh -s' < setup.sh
 # ── Embedded router file contents ──────────────────────────────────────
 
 NFT_INIT_SH = r"""#!/bin/sh
-# veggen nft accounting - re-created on each firewall reload
+# veggen nft accounting - idempotent, survives firewall reloads
 # Detect all LAN interfaces: bridge + wireless members
 LAN_IFS=$(uci -q get network.lan.device 2>/dev/null | tr -d '"')
 [ -z "$LAN_IFS" ] && LAN_IFS="br-lan"
@@ -19,16 +19,18 @@ for iface in $(brctl show 2>/dev/null | tail -n+3 | awk '{for(i=4;i<=NF;i++) pri
 done
 # Build nft set literal: "br-lan", "wt0"
 IF_SET=$(echo "$LAN_IFS" | tr ',' '\n' | sed 's/.*/"&"/' | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
-# Remove old rules if they exist (to avoid duplicates on reload)
-/usr/sbin/nft -a list chain inet fw4 forward 2>/dev/null | grep mac_outbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
-/usr/sbin/nft -a list chain inet fw4 forward 2>/dev/null | grep mac_inbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
-# Insert at top so they see all traffic before any accept/drop rules
-/usr/sbin/nft insert rule inet fw4 forward \
-    iifname { $IF_SET } \
-    meter mac_outbound_traffic { ether saddr counter }
-/usr/sbin/nft insert rule inet fw4 forward \
-    oifname { $IF_SET } \
-    meter mac_inbound_traffic { ether daddr counter }
+# Insert outbound meter only if it doesn't exist (counters persist across reloads)
+if ! /usr/sbin/nft list chain inet fw4 forward 2>/dev/null | grep -q mac_outbound_traffic; then
+    /usr/sbin/nft insert rule inet fw4 forward \
+        iifname { $IF_SET } \
+        meter mac_outbound_traffic { ether saddr counter }
+fi
+# Insert inbound meter only if it doesn't exist
+if ! /usr/sbin/nft list chain inet fw4 forward 2>/dev/null | grep -q mac_inbound_traffic; then
+    /usr/sbin/nft insert rule inet fw4 forward \
+        oifname { $IF_SET } \
+        meter mac_inbound_traffic { ether daddr counter }
+fi
 """
 
 PARSE_METERS_PY = r"""import re
