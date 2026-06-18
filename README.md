@@ -6,6 +6,7 @@ A simple web application to manage internet access for selected devices on an Op
 - Lists DHCP static hosts starting with the prefix `veggen-` (configurable).
 - Displays real-time internet access status (Online/Blocked).
 - Simple toggle to block or unblock internet access using MAC-based firewall rules.
+- **Optional traffic accounting**: per-device bandwidth usage with historical diverging area charts (download/upload over time).
 - No database required; uses the router's UCI configuration as the source of truth.
 
 ## Prerequisites
