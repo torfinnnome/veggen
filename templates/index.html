@@ -87,6 +87,27 @@
             gap: 0;
             border-bottom: 2px solid var(--pico-border-color);
             margin-bottom: 0;
+            align-items: center;
+        }
+        .tab-bar-tabs { display: flex; gap: 0; }
+        .search-input-wrap {
+            margin-left: auto;
+        }
+        .search-input {
+            border: 1px solid var(--pico-border-color);
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 0.8em;
+            background: var(--pico-background-color);
+            color: var(--pico-color);
+            outline: none;
+            width: 160px;
+            margin-bottom: 0;
+            height: auto;
+        }
+        .search-input:focus {
+            border-color: var(--pico-primary);
+            box-shadow: 0 0 0 2px var(--pico-primary-background);
         }
         .tab-btn {
             padding: 0.5rem 1rem;
@@ -143,8 +164,13 @@
                 <option value="year">Year</option>
             </select>
             <div class="tab-bar">
-                <button class="tab-btn active" onclick="switchTab('managed')">Managed</button>
-                <button class="tab-btn" onclick="switchTab('allhosts')">All Hosts</button>
+                <div class="tab-bar-tabs">
+                    <button class="tab-btn active" onclick="switchTab('managed')">Managed</button>
+                    <button class="tab-btn" onclick="switchTab('allhosts')">All Hosts</button>
+                </div>
+                <div class="search-input-wrap">
+                    <input type="text" class="search-input" id="search-input" placeholder="Search devices..." oninput="filterDevices()">
+                </div>
             </div>
             <div id="managed-tab">
                 <div class="loading">Loading...</div>
@@ -196,6 +222,7 @@
             var row = document.createElement('tr');
             row.className = 'detail-row';
             row.setAttribute('data-mac', mac);
+            row.setAttribute('data-expanded', 'false');
             row.style.display = 'none';
             var td = document.createElement('td');
             td.style.padding = '14px 14px 14px 34px';
@@ -218,7 +245,7 @@
         function toggleDetail(dev) {
             var mac = dev.mac;
             var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
-            if (!det || det.style.display === 'none') {
+            if (!det || det.getAttribute('data-expanded') === 'false') {
                 if (!det) {
                     var parentTr = dev._parentTr ||
                         document.querySelector('[data-mac="' + mac + '"]')?.closest('tr');
@@ -229,6 +256,7 @@
                     parentTr.parentNode.insertBefore(det, parentTr.nextSibling);
                 }
                 det.style.display = '';
+                det.setAttribute('data-expanded', 'true');
                 (async function () {
                     var period = 'day';
                     var data = _detailCache[mac];
@@ -236,8 +264,9 @@
                     if (data && data.period) period = data.period;
                     _renderDetail(mac, data || {}, period);
                 })();
-            } else {
+            } else if (det) {
                 det.style.display = 'none';
+                det.setAttribute('data-expanded', 'false');
             }
         }
 
@@ -668,6 +697,60 @@ cell.setAttribute('colspan', '5');
                 if (response.ok) await fetchDevices();
                 else alert('Failed to update group.');
             } catch (e) { console.error(e); }
+        }
+
+        function filterDevices() {
+            var query = document.getElementById('search-input').value.toLowerCase().trim();
+
+            // Filter Managed tab
+            var managedTbody = document.getElementById('devices-tbody');
+            if (managedTbody) {
+                var groupHeaders = managedTbody.querySelectorAll('tr.group-header');
+                groupHeaders.forEach(function(header) {
+                    var kid = header.querySelector('.kid-name')?.textContent.toLowerCase() || '';
+                    var next = header.nextElementSibling;
+                    var groupDeviceRows = [];
+                    var groupDetailRows = [];
+                    while (next && !next.classList.contains('group-header')) {
+                        if (next.classList.contains('device-row')) {
+                            groupDeviceRows.push(next);
+                            var det = next.nextElementSibling;
+                            if (det && det.classList.contains('detail-row')) groupDetailRows.push(det);
+                        }
+                        next = next.nextElementSibling;
+                    }
+                    var anyVisible = false;
+                    groupDeviceRows.forEach(function(row, i) {
+                        var name = row.querySelector('.device-name')?.textContent.toLowerCase() || '';
+                        var meta = row.querySelector('.device-meta')?.textContent.toLowerCase() || '';
+                        var match = !query || name.includes(query) || meta.includes(query) || kid.includes(query);
+                        var det = groupDetailRows[i];
+                        var detWasOpen = det && det.getAttribute('data-expanded') === 'true';
+                        row.style.display = match ? '' : 'none';
+                        if (match) anyVisible = true;
+                        if (det) det.style.display = (match && detWasOpen) ? '' : 'none';
+                    });
+                    header.style.display = (!query || kid.includes(query) || anyVisible) ? '' : 'none';
+                });
+            }
+
+            // Filter All Hosts tab
+            var allhostsTbody = document.getElementById('allhosts-tbody');
+            if (allhostsTbody) {
+                var rows = allhostsTbody.querySelectorAll('tr.device-row');
+                rows.forEach(function(row) {
+                    var name = row.querySelector('td:nth-child(1)')?.textContent.toLowerCase() || '';
+                    var ip = row.querySelector('td:nth-child(2)')?.textContent.toLowerCase() || '';
+                    var mac = row.querySelector('td:nth-child(3)')?.textContent.toLowerCase() || '';
+                    var match = !query || name.includes(query) || ip.includes(query) || mac.includes(query);
+                    row.style.display = match ? '' : 'none';
+                    var det = row.nextElementSibling;
+                    if (det && det.classList.contains('detail-row')) {
+                        var detWasOpen = det.getAttribute('data-expanded') === 'true';
+                        det.style.display = (match && detWasOpen) ? '' : 'none';
+                    }
+                });
+            }
         }
 
         fetchDevices();
