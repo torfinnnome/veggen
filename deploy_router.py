@@ -138,6 +138,7 @@ def generate():
             "/etc/firewall.user",
             FIREWALL_USER_APPEND,
         ),
+        "chmod +x /etc/firewall.user",
         "",
         "# 5. Initialize meters",
         "/usr/share/veggen/nft-accounting-init.sh",
