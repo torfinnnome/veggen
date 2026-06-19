@@ -9,7 +9,7 @@ Then pipe to router: ssh root@router 'sh -s' < setup.sh
 # ── Embedded router file contents ──────────────────────────────────────
 
 NFT_INIT_SH = r"""#!/bin/sh
-# veggen nft accounting - idempotent, survives firewall reloads
+# veggen nft accounting - separate table to survive fw4 reloads
 # Detect all LAN interfaces: bridge + wireless members
 LAN_IFS=$(uci -q get network.lan.device 2>/dev/null | tr -d '"')
 [ -z "$LAN_IFS" ] && LAN_IFS="br-lan"
@@ -19,18 +19,20 @@ for iface in $(brctl show 2>/dev/null | tail -n+3 | awk '{for(i=4;i<=NF;i++) pri
 done
 # Build nft set literal: "br-lan", "wt0"
 IF_SET=$(echo "$LAN_IFS" | tr ',' '\n' | sed 's/.*/"&"/' | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
-# Insert outbound meter only if it doesn't exist (counters persist across reloads)
-if ! /usr/sbin/nft list chain inet fw4 forward 2>/dev/null | grep -q mac_outbound_traffic; then
-    /usr/sbin/nft insert rule inet fw4 forward \
+# Create separate table if it doesn't exist (survives fw4 reloads)
+if ! /usr/sbin/nft list table inet veggen >/dev/null 2>&1; then
+    /usr/sbin/nft add table inet veggen
+    /usr/sbin/nft add chain inet veggen accounting '{ type filter hook forward priority -1; policy accept; }'
+    /usr/sbin/nft add rule inet veggen accounting \
         iifname { $IF_SET } \
         meter mac_outbound_traffic { ether saddr counter }
-fi
-# Insert inbound meter only if it doesn't exist
-if ! /usr/sbin/nft list chain inet fw4 forward 2>/dev/null | grep -q mac_inbound_traffic; then
-    /usr/sbin/nft insert rule inet fw4 forward \
+    /usr/sbin/nft add rule inet veggen accounting \
         oifname { $IF_SET } \
         meter mac_inbound_traffic { ether daddr counter }
 fi
+# Remove stale meters from fw4 if they exist (migration from old approach)
+/usr/sbin/nft list chain inet fw4 forward 2>/dev/null | grep mac_outbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
+/usr/sbin/nft list chain inet fw4 forward 2>/dev/null | grep mac_inbound_traffic | grep -o 'handle [0-9]*' | awk '{print $2}' | while read h; do /usr/sbin/nft delete rule inet fw4 forward handle $h; done
 """
 
 PARSE_METERS_PY = r"""import re
@@ -49,8 +51,8 @@ def parse(cmd):
     }
 
 ts = int(sys.argv[1])
-out = parse('/usr/sbin/nft list meter inet fw4 mac_outbound_traffic 2>/dev/null')
-inf = parse('/usr/sbin/nft list meter inet fw4 mac_inbound_traffic 2>/dev/null')
+out = parse('/usr/sbin/nft list meter inet veggen mac_outbound_traffic 2>/dev/null')
+inf = parse('/usr/sbin/nft list meter inet veggen mac_inbound_traffic 2>/dev/null')
 
 db = sqlite3.connect('/etc/veggen/traffic.db')
 cur = db.cursor()
