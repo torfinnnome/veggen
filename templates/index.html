@@ -772,16 +772,19 @@ cell.setAttribute('colspan', '5');
             }
         }
 
-        function reloadAll() {
+        async function reloadAll() {
+            var query = document.getElementById('search-input').value;
             _detailCache = {};
             if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
             document.querySelectorAll('.detail-row').forEach(function(det) {
                 det.style.display = 'none';
                 det.setAttribute('data-expanded', 'false');
             });
-            fetchDevices();
-            fetchAllHosts();
-            fetchBatchTraffic();
+            await fetchDevices();
+            await fetchAllHosts();
+            await fetchBatchTraffic();
+            document.getElementById('search-input').value = query;
+            filterDevices();
         }
 
         fetchDevices();
