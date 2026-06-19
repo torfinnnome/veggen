@@ -92,6 +92,24 @@
         .tab-bar-tabs { display: flex; gap: 0; }
         .search-input-wrap {
             margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .reload-btn {
+            background: none;
+            border: 1px solid var(--pico-border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            padding: 2px 8px;
+            color: var(--pico-color);
+            margin: 0;
+            line-height: 1;
+        }
+        .reload-btn:hover {
+            color: var(--pico-primary);
+            border-color: var(--pico-primary);
         }
         .search-input {
             border: 1px solid var(--pico-border-color);
@@ -170,6 +188,7 @@
                 </div>
                 <div class="search-input-wrap">
                     <input type="text" class="search-input" id="search-input" placeholder="Search devices..." oninput="filterDevices()">
+                    <button class="reload-btn" onclick="reloadAll()" title="Reload data">&#x21bb;</button>
                 </div>
             </div>
             <div id="managed-tab">
@@ -751,6 +770,18 @@ cell.setAttribute('colspan', '5');
                     }
                 });
             }
+        }
+
+        function reloadAll() {
+            _detailCache = {};
+            if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
+            document.querySelectorAll('.detail-row').forEach(function(det) {
+                det.style.display = 'none';
+                det.setAttribute('data-expanded', 'false');
+            });
+            fetchDevices();
+            fetchAllHosts();
+            fetchBatchTraffic();
         }
 
         fetchDevices();
