@@ -97,15 +97,12 @@
             gap: 6px;
         }
         .reload-btn {
-            background: none !important;
-            border: 1px solid var(--pico-border-color) !important;
+            border: 1px solid var(--pico-border-color);
             border-radius: 6px;
             cursor: pointer;
             font-size: 1.1em;
             padding: 2px 8px;
-            margin: 0;
             line-height: 1;
-            color: var(--pico-color) !important;
         }
         .reload-btn:hover {
             color: var(--pico-primary);
@@ -188,7 +185,7 @@
                 </div>
                 <div class="search-input-wrap">
                     <input type="text" class="search-input" id="search-input" placeholder="Search devices..." oninput="filterDevices()">
-                    <button class="reload-btn" onclick="reloadAll()" title="Reload data">&#x21bb;</button>
+                    <span class="reload-btn" onclick="reloadAll()" title="Reload data">&#x21bb;</span>
                 </div>
             </div>
             <div id="managed-tab">
