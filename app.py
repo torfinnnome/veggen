@@ -327,6 +327,83 @@ def _bucket_seconds(period):
     return {"day": 900, "week": 86400, "month": 86400, "year": 604800}.get(period, 86400)
 
 
+def _aggregate_history_rows(rows, bucket_size, cutoff):
+    """Aggregate raw snapshots into per-bucket traffic totals via consecutive-delta sums.
+
+    Each delta between consecutive snapshots is attributed to the bucket of its
+    *start* timestamp, so the result is correct regardless of the snapshot
+    interval (decoupled from the cron schedule). Counter resets (router reboots)
+    yield negative deltas and are clamped to 0, treating the post-reset value as
+    a new baseline.
+
+    rows: iterable of (ts, bytes_out, bytes_in) ordered by ts ascending.
+    Returns (buckets, total_up, total_down) where buckets is a list of
+    {"ts": int, "up": int, "down": int} sorted by ts. Only deltas whose start
+    ts is >= cutoff are counted; the first snapshot in the period has no
+    predecessor and contributes nothing (one snapshot interval of boundary loss,
+    same edge effect as the previous MAX-MIN approach).
+    """
+    bucket_up = {}
+    bucket_down = {}
+    total_up = 0
+    total_down = 0
+    prev_ts = None
+    prev_out = None
+    prev_in = None
+    for ts, out, inb in rows:
+        if prev_ts is not None and prev_ts >= cutoff:
+            d_out = out - prev_out
+            d_in = inb - prev_in
+            if d_out < 0:
+                d_out = 0
+            if d_in < 0:
+                d_in = 0
+            b = (prev_ts // bucket_size) * bucket_size
+            bucket_up[b] = bucket_up.get(b, 0) + d_out
+            bucket_down[b] = bucket_down.get(b, 0) + d_in
+            total_up += d_out
+            total_down += d_in
+        prev_ts = ts
+        prev_out = out
+        prev_in = inb
+
+    buckets = [
+        {"ts": b, "up": bucket_up.get(b, 0), "down": bucket_down.get(b, 0)}
+        for b in sorted(set(bucket_up) | set(bucket_down))
+    ]
+    return buckets, total_up, total_down
+
+
+def _aggregate_batch_rows(rows, cutoff):
+    """Aggregate raw snapshots into per-MAC traffic totals via consecutive-delta sums.
+
+    rows: iterable of (mac, ts, bytes_out, bytes_in) ordered by mac, then ts ascending.
+    Returns {mac: {"up": int, "down": int}}. See _aggregate_history_rows for the
+    reset/decoupling semantics.
+    """
+    totals = {}
+    prev_mac = None
+    prev_ts = None
+    prev_out = None
+    prev_in = None
+    for mac, ts, out, inb in rows:
+        if mac != prev_mac:
+            prev_mac, prev_ts, prev_out, prev_in = mac, ts, out, inb
+            continue
+        if prev_ts >= cutoff:
+            d_out = out - prev_out
+            d_in = inb - prev_in
+            if d_out < 0:
+                d_out = 0
+            if d_in < 0:
+                d_in = 0
+            t = totals.setdefault(mac, {"up": 0, "down": 0})
+            t["up"] += d_out
+            t["down"] += d_in
+        prev_ts, prev_out, prev_in = ts, out, inb
+    return totals
+
+
 def _period_cutoff(period):
     now = time.time()
     return {
@@ -352,15 +429,13 @@ def traffic_history():
     cutoff = _period_cutoff(period)
     bucket_size = _bucket_seconds(period)
 
-    # Query SQLite on router via SSH using python3
+    # Fetch raw snapshots; aggregation (delta-sum, bucketed by start ts) runs on
+    # the app side so the result is correct regardless of the cron interval.
     query = (
-        f"SELECT (ts / {bucket_size}) * {bucket_size} AS bucket_ts, "
-        f"       MAX(bytes_out) - MIN(bytes_out) AS bytes_up, "
-        f"       MAX(bytes_in) - MIN(bytes_in) AS bytes_down "
+        f"SELECT ts, bytes_out, bytes_in "
         f"FROM mac_traffic "
         f"WHERE mac = '{mac}' AND ts >= {int(cutoff)} "
-        f"GROUP BY bucket_ts "
-        f"ORDER BY bucket_ts"
+        f"ORDER BY ts"
     )
     raw = run_ssh_command(
         f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
@@ -369,9 +444,7 @@ def traffic_history():
     if not raw:
         return jsonify(_empty_history(period, mac))
 
-    buckets = []
-    total_up = 0
-    total_down = 0
+    rows = []
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -380,21 +453,20 @@ def traffic_history():
         if len(parts) < 3:
             continue
         try:
-            bucket_ts = int(parts[0])
-            bucket_up = max(0, int(parts[1]))
-            bucket_down = max(0, int(parts[2]))
-            # Rate in Mbps: bytes / bucket_seconds * 8 / 1_000_000
-            up_mbps = round(bucket_up * 8 / bucket_size / 1_000_000, 3)
-            down_mbps = round(bucket_down * 8 / bucket_size / 1_000_000, 3)
-            buckets.append({"ts": bucket_ts, "up": bucket_up, "down": bucket_down,
-                            "up_mbps": up_mbps, "down_mbps": down_mbps})
-            total_up += bucket_up
-            total_down += bucket_down
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
         except (ValueError, IndexError):
             continue
 
-    if not buckets:
+    agg, total_up, total_down = _aggregate_history_rows(rows, bucket_size, cutoff)
+    if not agg:
         return jsonify(_empty_history(period, mac))
+
+    buckets = []
+    for b in agg:
+        up_mbps = round(b["up"] * 8 / bucket_size / 1_000_000, 3)
+        down_mbps = round(b["down"] * 8 / bucket_size / 1_000_000, 3)
+        buckets.append({"ts": b["ts"], "up": b["up"], "down": b["down"],
+                        "up_mbps": up_mbps, "down_mbps": down_mbps})
 
     # Fill empty buckets so the chart shows zeros instead of skipping time
     first_ts = buckets[0]["ts"]
@@ -447,12 +519,10 @@ def traffic_batch_history():
 
     cutoff = _period_cutoff(period)
     query = (
-        f"SELECT mac, "
-        f"       MAX(bytes_out) - MIN(bytes_out) AS total_up, "
-        f"       MAX(bytes_in) - MIN(bytes_in) AS total_down "
+        f"SELECT mac, ts, bytes_out, bytes_in "
         f"FROM mac_traffic "
         f"WHERE ts >= {int(cutoff)} "
-        f"GROUP BY mac"
+        f"ORDER BY mac, ts"
     )
     raw = run_ssh_command(
         f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
@@ -461,22 +531,20 @@ def traffic_batch_history():
     if not raw:
         return jsonify({"period": period, "macs": {}})
 
-    macs = {}
+    rows = []
     for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
         parts = line.split("|")
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
         try:
-            macs[parts[0]] = {
-                "up": max(0, int(parts[1])),
-                "down": max(0, int(parts[2])),
-            }
+            rows.append((parts[0], int(parts[1]), int(parts[2]), int(parts[3])))
         except (ValueError, IndexError):
             continue
 
+    macs = _aggregate_batch_rows(rows, cutoff)
     return jsonify({"period": period, "macs": macs})
 
 
