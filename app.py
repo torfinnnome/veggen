@@ -44,7 +44,7 @@ def run_ssh_command(command):
     """
     ssh_cmd = ["ssh", f"{SSH_USER}@{ROUTER_IP}", command]
     try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
         if result.stderr:
             filtered_stderr = "\n".join([l for l in result.stderr.splitlines() if "[!]" not in l])
             if filtered_stderr:
@@ -59,24 +59,43 @@ def sanitize_mac(mac):
     return mac.replace(":", "").lower()
 
 
-def _parse_meter(name):
-    """Runs nft list meter and returns {mac: bytes} for each entry."""
-    output = run_ssh_command(f'sudo /usr/sbin/nft list meter inet veggen {name} 2>/dev/null')
+def _read_nlbwmon():
+    """Runs nlbw -c csv and returns {mac: {"rx": bytes, "tx": bytes}}.
+
+    nlbwmon reads conntrack counters, which the kernel flowtable synchronizes
+    when the flowtable definition includes the `counter` statement (fw4 default
+    since OpenWrt 23.05.0). This counts software-offloaded flows that nft meters
+    in the forward chain miss. rx = traffic to the host (download), tx = traffic
+    from the host (upload).
+    """
+    output = run_ssh_command('/usr/sbin/nlbw -c csv -g mac -o mac -q 2>/dev/null')
     result = {}
     for line in output.splitlines():
-        match = re.match(r'([0-9a-f:]+) counter packets \d+ bytes (\d+)', line)
-        if match:
-            mac, bytes_str = match.groups()
-            if mac != "ff:ff:ff:ff:ff:ff":
-                result[mac.lower()] = int(bytes_str)
+        fields = line.split('\t')
+        if len(fields) < 6:
+            continue
+        mac = fields[0].strip().lower()
+        if not mac or mac == "00:00:00:00:00:00":
+            continue
+        try:
+            rx = int(fields[2])
+            tx = int(fields[4])
+        except ValueError:
+            continue
+        result[mac] = {"rx": rx, "tx": tx}
     return result
 
 
 def _read_meters():
-    """Returns current meter readings as {"up": {mac: bytes}, "down": {mac: bytes}}."""
+    """Returns current readings as {"up": {mac: bytes}, "down": {mac: bytes}}.
+
+    up = traffic from the device (upload, nlbwmon tx), down = traffic to the
+    device (download, nlbwmon rx).
+    """
+    data = _read_nlbwmon()
     return {
-        "up": _parse_meter("mac_outbound_traffic"),
-        "down": _parse_meter("mac_inbound_traffic"),
+        "up": {mac: v["tx"] for mac, v in data.items()},
+        "down": {mac: v["rx"] for mac, v in data.items()},
     }
 
 
@@ -323,101 +342,14 @@ def toggle_access():
     return jsonify({"success": True})
 
 
-def _bucket_seconds(period):
-    return {"day": 900, "week": 86400, "month": 86400, "year": 604800}.get(period, 86400)
-
-
-def _aggregate_history_rows(rows, bucket_size, cutoff):
-    """Aggregate raw snapshots into per-bucket traffic totals via consecutive-delta sums.
-
-    Each delta between consecutive snapshots is attributed to the bucket of its
-    *start* timestamp, so the result is correct regardless of the snapshot
-    interval (decoupled from the cron schedule). Counter resets (router reboots)
-    yield negative deltas and are clamped to 0, treating the post-reset value as
-    a new baseline.
-
-    rows: iterable of (ts, bytes_out, bytes_in) ordered by ts ascending.
-    Returns (buckets, total_up, total_down) where buckets is a list of
-    {"ts": int, "up": int, "down": int} sorted by ts. Only deltas whose start
-    ts is >= cutoff are counted; the first snapshot in the period has no
-    predecessor and contributes nothing (one snapshot interval of boundary loss,
-    same edge effect as the previous MAX-MIN approach).
-    """
-    bucket_up = {}
-    bucket_down = {}
-    total_up = 0
-    total_down = 0
-    prev_ts = None
-    prev_out = None
-    prev_in = None
-    for ts, out, inb in rows:
-        if prev_ts is not None and prev_ts >= cutoff:
-            d_out = out - prev_out
-            d_in = inb - prev_in
-            if d_out < 0:
-                d_out = 0
-            if d_in < 0:
-                d_in = 0
-            b = (prev_ts // bucket_size) * bucket_size
-            bucket_up[b] = bucket_up.get(b, 0) + d_out
-            bucket_down[b] = bucket_down.get(b, 0) + d_in
-            total_up += d_out
-            total_down += d_in
-        prev_ts = ts
-        prev_out = out
-        prev_in = inb
-
-    buckets = [
-        {"ts": b, "up": bucket_up.get(b, 0), "down": bucket_down.get(b, 0)}
-        for b in sorted(set(bucket_up) | set(bucket_down))
-    ]
-    return buckets, total_up, total_down
-
-
-def _aggregate_batch_rows(rows, cutoff):
-    """Aggregate raw snapshots into per-MAC traffic totals via consecutive-delta sums.
-
-    rows: iterable of (mac, ts, bytes_out, bytes_in) ordered by mac, then ts ascending.
-    Returns {mac: {"up": int, "down": int}}. See _aggregate_history_rows for the
-    reset/decoupling semantics.
-    """
-    totals = {}
-    prev_mac = None
-    prev_ts = None
-    prev_out = None
-    prev_in = None
-    for mac, ts, out, inb in rows:
-        if mac != prev_mac:
-            prev_mac, prev_ts, prev_out, prev_in = mac, ts, out, inb
-            continue
-        if prev_ts >= cutoff:
-            d_out = out - prev_out
-            d_in = inb - prev_in
-            if d_out < 0:
-                d_out = 0
-            if d_in < 0:
-                d_in = 0
-            t = totals.setdefault(mac, {"up": 0, "down": 0})
-            t["up"] += d_out
-            t["down"] += d_in
-        prev_ts, prev_out, prev_in = ts, out, inb
-    return totals
-
-
-def _period_cutoff(period):
-    now = time.time()
-    return {
-        "day": now - 86400,
-        "week": now - 604800,
-        "month": now - 2592000,
-        "year": now - 31536000,
-    }.get(period, now - 86400)
-
-
 @app.route("/api/traffic/history")
 @login_required
 def traffic_history():
-    """Returns aggregated traffic history for a device from SQLite."""
+    """Returns aggregated traffic history for a device.
+
+    Aggregation runs on the router (traffic_aggregate.py) so only the final
+    chart data crosses SSH, not the raw snapshot rows.
+    """
     mac = request.args.get("mac", "").lower()
     period = request.args.get("period", "day")
 
@@ -426,75 +358,17 @@ def traffic_history():
     if period not in ("day", "week", "month", "year"):
         return jsonify({"error": "Invalid period"}), 400
 
-    cutoff = _period_cutoff(period)
-    bucket_size = _bucket_seconds(period)
-
-    # Fetch raw snapshots; aggregation (delta-sum, bucketed by start ts) runs on
-    # the app side so the result is correct regardless of the cron interval.
-    query = (
-        f"SELECT ts, bytes_out, bytes_in "
-        f"FROM mac_traffic "
-        f"WHERE mac = '{mac}' AND ts >= {int(cutoff)} "
-        f"ORDER BY ts"
-    )
     raw = run_ssh_command(
-        f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
-        f" [print('|'.join(str(x) for x in r)) for r in db.execute('''{query}''')]\""
+        f"python3 /usr/share/veggen/traffic_aggregate.py history "
+        f"--mac {mac} --period {period}"
     )
     if not raw:
         return jsonify(_empty_history(period, mac))
-
-    rows = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("|")
-        if len(parts) < 3:
-            continue
-        try:
-            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
-        except (ValueError, IndexError):
-            continue
-
-    agg, total_up, total_down = _aggregate_history_rows(rows, bucket_size, cutoff)
-    if not agg:
+    try:
+        data = json.loads(raw)
+    except ValueError:
         return jsonify(_empty_history(period, mac))
-
-    buckets = []
-    for b in agg:
-        up_mbps = round(b["up"] * 8 / bucket_size / 1_000_000, 3)
-        down_mbps = round(b["down"] * 8 / bucket_size / 1_000_000, 3)
-        buckets.append({"ts": b["ts"], "up": b["up"], "down": b["down"],
-                        "up_mbps": up_mbps, "down_mbps": down_mbps})
-
-    # Fill empty buckets so the chart shows zeros instead of skipping time
-    first_ts = buckets[0]["ts"]
-    last_ts = buckets[-1]["ts"]
-    bucket_map = {b["ts"]: b for b in buckets}
-    filled = []
-    ts = first_ts
-    while ts <= last_ts:
-        if ts in bucket_map:
-            filled.append(bucket_map[ts])
-        else:
-            filled.append({"ts": ts, "up": 0, "down": 0, "up_mbps": 0, "down_mbps": 0})
-        ts += bucket_size
-    buckets = filled
-
-    span_days = max((last_ts - first_ts) / 86400, 1)
-    avg_up_per_day = int(total_up / span_days)
-    avg_down_per_day = int(total_down / span_days)
-
-    return jsonify({
-        "period": period,
-        "mac": mac,
-        "total_up": total_up,
-        "total_down": total_down,
-        "avg_up_per_day": avg_up_per_day,
-        "avg_down_per_day": avg_down_per_day,
-        "buckets": buckets,
-    })
+    return jsonify(data)
 
 
 def _empty_history(period, mac):
@@ -512,40 +386,25 @@ def _empty_history(period, mac):
 @app.route("/api/traffic/batch-history")
 @login_required
 def traffic_batch_history():
-    """Returns total traffic for all MACs in the selected period via one SQLite query."""
+    """Returns total traffic for all MACs in the selected period.
+
+    Aggregation runs on the router (traffic_aggregate.py) so only the per-MAC
+    totals cross SSH, not the raw snapshot rows.
+    """
     period = request.args.get("period", "day")
     if period not in ("day", "week", "month", "year"):
         return jsonify({"error": "Invalid period"}), 400
 
-    cutoff = _period_cutoff(period)
-    query = (
-        f"SELECT mac, ts, bytes_out, bytes_in "
-        f"FROM mac_traffic "
-        f"WHERE ts >= {int(cutoff)} "
-        f"ORDER BY mac, ts"
-    )
     raw = run_ssh_command(
-        f"python3 -c \"import sqlite3; db=sqlite3.connect('/etc/veggen/traffic.db');"
-        f" [print('|'.join(str(x) for x in r)) for r in db.execute('''{query}''')]\""
+        f"python3 /usr/share/veggen/traffic_aggregate.py batch --period {period}"
     )
     if not raw:
         return jsonify({"period": period, "macs": {}})
-
-    rows = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("|")
-        if len(parts) < 4:
-            continue
-        try:
-            rows.append((parts[0], int(parts[1]), int(parts[2]), int(parts[3])))
-        except (ValueError, IndexError):
-            continue
-
-    macs = _aggregate_batch_rows(rows, cutoff)
-    return jsonify({"period": period, "macs": macs})
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return jsonify({"period": period, "macs": {}})
+    return jsonify(data)
 
 
 @app.route("/api/traffic/summary")

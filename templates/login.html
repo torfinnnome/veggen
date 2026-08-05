@@ -5,10 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - Veggen</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script>
+        // Apply saved theme before first paint to avoid a flash of the wrong theme.
+        (function () {
+            var saved = localStorage.getItem('veggen-theme');
+            document.documentElement.setAttribute('data-theme', saved === 'dark' ? 'dark' : 'light');
+        })();
+    </script>
     <style>
+        :root[data-theme="light"] { --veggen-error: #d81b60; }
+        :root[data-theme="dark"] { --veggen-error: #f06292; }
         body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
         article { width: 100%; max-width: 400px; }
-        .error { color: #d81b60; margin-bottom: 1rem; }
+        .error { color: var(--veggen-error); margin-bottom: 1rem; }
     </style>
 </head>
 <body>

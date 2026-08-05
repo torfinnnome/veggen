@@ -6,10 +6,31 @@
     <title>Veggen Management</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script>
+        // Apply saved theme before first paint to avoid a flash of the wrong theme.
+        (function () {
+            var saved = localStorage.getItem('veggen-theme');
+            document.documentElement.setAttribute('data-theme', saved === 'dark' ? 'dark' : 'light');
+        })();
+    </script>
     <style>
         :root { --pico-spacing: 0.5rem; }
-        .status-blocked { color: #d81b60; font-weight: bold; font-size: 0.85em; }
-        .status-online { color: #2e7d32; font-weight: bold; font-size: 0.85em; }
+        :root[data-theme="light"] {
+            --veggen-status-blocked: #d81b60;
+            --veggen-status-online: #2e7d32;
+            --veggen-pill-border: #d9dce0;
+            --veggen-pill-text: #1e293b;
+            --veggen-tab-hover: #1e293b;
+        }
+        :root[data-theme="dark"] {
+            --veggen-status-blocked: #f06292;
+            --veggen-status-online: #66bb6a;
+            --veggen-pill-border: #4a5568;
+            --veggen-pill-text: #e2e8f0;
+            --veggen-tab-hover: #e2e8f0;
+        }
+        .status-blocked { color: var(--veggen-status-blocked); font-weight: bold; font-size: 0.85em; }
+        .status-online { color: var(--veggen-status-online); font-weight: bold; font-size: 0.85em; }
         .loading { display: none; }
         [aria-busy="true"] .loading { display: inline-block; }
         
@@ -66,9 +87,9 @@
         .period-pill {
             padding: 3px 12px;
             border-radius: 12px;
-            border: 1px solid #d9dce0;
+            border: 1px solid var(--veggen-pill-border);
             background: none;
-            color: #1e293b;
+            color: var(--veggen-pill-text);
             font-size: 11px;
             cursor: pointer;
             margin: 0;
@@ -135,7 +156,7 @@
             margin-bottom: -2px;
             color: var(--pico-muted-color);
         }
-        .tab-btn:hover { color: #1e293b; }
+        .tab-btn:hover { color: var(--veggen-tab-hover); }
         .tab-btn.active {
             color: var(--pico-primary);
             border-bottom-color: var(--pico-primary);
@@ -168,7 +189,10 @@
 <body>
     <nav class="container">
         <ul><li><strong>Veggen</strong></li></ul>
-        <ul><li><a href="/logout" class="secondary" style="font-size: 0.8em;">Logout</a></li></ul>
+        <ul>
+            <li><button id="theme-toggle" class="secondary" style="font-size: 0.8em; margin: 0;" onclick="toggleTheme()">Dark</button></li>
+            <li><a href="/logout" class="secondary" style="font-size: 0.8em;">Logout</a></li>
+        </ul>
     </nav>
     <main class="container">
         <section id="device-list" aria-busy="true">
@@ -224,7 +248,51 @@
 
     <script>
         var _detailCache = {};
-        var _currentChart = null;
+        var _charts = {};
+
+        function _isDark() {
+            return document.documentElement.getAttribute('data-theme') === 'dark';
+        }
+
+        function _chartColors() {
+            if (_isDark()) {
+                return {
+                    down: '#64b5f6',
+                    downFill: 'rgba(100,181,246,0.25)',
+                    up: '#ef9a9a',
+                    upFill: 'rgba(239,154,154,0.25)',
+                    grid: 'rgba(255,255,255,0.1)',
+                    tick: '#9ca3af'
+                };
+            }
+            return {
+                down: '#1565c0',
+                downFill: 'rgba(21,101,192,0.35)',
+                up: '#c62828',
+                upFill: 'rgba(198,40,40,0.35)',
+                grid: 'rgba(0,0,0,0.1)',
+                tick: '#6b7280'
+            };
+        }
+
+        function updateThemeButton() {
+            var btn = document.getElementById('theme-toggle');
+            if (btn) btn.textContent = _isDark() ? 'Light' : 'Dark';
+        }
+
+        function toggleTheme() {
+            var html = document.documentElement;
+            var theme = _isDark() ? 'light' : 'dark';
+            html.setAttribute('data-theme', theme);
+            localStorage.setItem('veggen-theme', theme);
+            updateThemeButton();
+            // Re-render all open charts so grid/tick colors match the new theme.
+            document.querySelectorAll('.detail-row[data-expanded="true"]').forEach(function (det) {
+                var mac = det.getAttribute('data-mac');
+                var data = _detailCache[mac];
+                if (data && data.period) _renderDetail(mac, data, data.period);
+            });
+        }
 
         function _formatBytes(b) {
             if (b === 0) return '0 B';
@@ -283,6 +351,7 @@
             } else if (det) {
                 det.style.display = 'none';
                 det.setAttribute('data-expanded', 'false');
+                if (_charts[mac]) { _charts[mac].destroy(); delete _charts[mac]; }
             }
         }
 
@@ -323,10 +392,10 @@
             upL.innerHTML = '\u2191 <strong>' + _formatBytes(data.total_up || 0) + '</strong>';
             statsDiv.appendChild(upL);
             var avgD = document.createElement('span');
-            avgD.textContent = 'avg ' + _formatBytes(data.avg_down_per_day || 0) + '/day';
+            avgD.textContent = '\u2193 avg ' + _formatBytes(data.avg_down_per_day || 0) + '/day';
             statsDiv.appendChild(avgD);
             var avgU = document.createElement('span');
-            avgU.textContent = 'avg ' + _formatBytes(data.avg_up_per_day || 0) + '/day';
+            avgU.textContent = '\u2191 avg ' + _formatBytes(data.avg_up_per_day || 0) + '/day';
             statsDiv.appendChild(avgU);
             container.appendChild(statsDiv);
             var cw = document.createElement('div');
@@ -335,8 +404,11 @@
             cw.appendChild(canvas);
             container.appendChild(cw);
             td.appendChild(container);
-            if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
+
+            // Destroy previous chart for this MAC (not global)
+            if (_charts[mac]) { _charts[mac].destroy(); delete _charts[mac]; }
             if (!data.buckets || data.buckets.length === 0) return;
+
             var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             var labels = data.buckets.map(function (bk) {
                 var d = new Date(bk.ts * 1000);
@@ -345,56 +417,133 @@
                     var m = d.getMinutes();
                     return h + ':' + (m < 10 ? '0' : '') + m;
                 }
+                if (period === 'year') {
+                    var oneJan = new Date(d.getFullYear(), 0, 1);
+                    var weekNum = Math.ceil(((d - oneJan) / 86400000 + oneJan.getDay() + 1) / 7);
+                    return months[d.getMonth()] + ' ' + weekNum;
+                }
                 return months[d.getMonth()] + ' ' + d.getDate();
             });
-            var maxMbps = 0;
-            data.buckets.forEach(function (bk) {
-                if (bk.down_mbps > maxMbps) maxMbps = bk.down_mbps;
-                if (bk.up_mbps > maxMbps) maxMbps = bk.up_mbps;
-            });
-            _currentChart = new Chart(canvas, {
-                type: 'line',
+
+            var colors = _chartColors();
+            var chartType, downDataset, upDataset, xTicksMaxRotation, yTickCallback;
+
+            if (period === 'day') {
+                // Diverging line — Mbps, no fill, thin lines
+                chartType = 'line';
+                xTicksMaxRotation = 0;
+                yTickCallback = function (v) {
+                    var av = Math.abs(v);
+                    if (av >= 1) return av.toFixed(1) + ' Mbps';
+                    var kbps = av * 1000;
+                    if (kbps >= 1) return kbps.toFixed(0) + ' kbps';
+                    return (kbps * 1000).toFixed(0) + ' bps';
+                };
+                downDataset = {
+                    label: 'Down',
+                    data: data.buckets.map(function (bk) { return bk.down_mbps; }),
+                    borderColor: colors.down,
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 1.5,
+                    borderSkipped: false
+                };
+                upDataset = {
+                    label: 'Up',
+                    data: data.buckets.map(function (bk) { return -bk.up_mbps; }),
+                    borderColor: colors.up,
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 1.5,
+                    borderSkipped: false
+                };
+            } else if (period === 'week' || period === 'month') {
+                // Diverging bar chart — MB per day
+                chartType = 'bar';
+                xTicksMaxRotation = period === 'week' ? 0 : 45;
+                yTickCallback = function (v) {
+                    var av = Math.abs(v);
+                    if (av >= 1024) return (av / 1024).toFixed(1) + ' GB';
+                    return av.toFixed(0) + ' MB';
+                };
+                downDataset = {
+                    label: 'Down',
+                    data: data.buckets.map(function (bk) { return bk.down / (1024 * 1024); }),
+                    backgroundColor: colors.down,
+                    borderRadius: 2,
+                    borderSkipped: false
+                };
+                upDataset = {
+                    label: 'Up',
+                    data: data.buckets.map(function (bk) { return -(bk.up / (1024 * 1024)); }),
+                    backgroundColor: colors.up,
+                    borderRadius: 2,
+                    borderSkipped: false
+                };
+            } else {
+                // Year: diverging line with points — GB per week
+                chartType = 'line';
+                xTicksMaxRotation = 0;
+                yTickCallback = function (v) {
+                    var av = Math.abs(v);
+                    return av.toFixed(1) + ' GB';
+                };
+                downDataset = {
+                    label: 'Down',
+                    data: data.buckets.map(function (bk) { return bk.down / (1024 * 1024 * 1024); }),
+                    borderColor: colors.down,
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.2,
+                    pointRadius: 3,
+                    pointBackgroundColor: colors.down,
+                    borderWidth: 1.5,
+                    borderSkipped: false
+                };
+                upDataset = {
+                    label: 'Up',
+                    data: data.buckets.map(function (bk) { return -(bk.up / (1024 * 1024 * 1024)); }),
+                    borderColor: colors.up,
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.2,
+                    pointRadius: 3,
+                    pointBackgroundColor: colors.up,
+                    borderWidth: 1.5,
+                    borderSkipped: false
+                };
+            }
+
+            _charts[mac] = new Chart(canvas, {
+                type: chartType,
                 data: {
                     labels: labels,
-                    datasets: [
-                        {
-                            label: 'Down',
-                            data: data.buckets.map(function (bk) { return bk.down_mbps; }),
-                            borderColor: '#1565c0',
-                            backgroundColor: 'rgba(21,101,192,0.35)',
-                            fill: 'origin',
-                            tension: 0.3,
-                            pointRadius: 0,
-                            borderWidth: 1.5
-                        },
-                        {
-                            label: 'Up',
-                            data: data.buckets.map(function (bk) { return -bk.up_mbps; }),
-                            borderColor: '#c62828',
-                            backgroundColor: 'rgba(198,40,40,0.35)',
-                            fill: 'origin',
-                            tension: 0.3,
-                            pointRadius: 0,
-                            borderWidth: 1.5
-                        }
-                    ]
+                    datasets: [downDataset, upDataset]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: { grid: { display: false } },
+                        x: {
+                            grid: { display: false },
+                            ticks: {
+                                color: colors.tick,
+                                maxRotation: xTicksMaxRotation,
+                                autoSkip: true,
+                                maxTicksLimit: period === 'day' ? 12 : (period === 'month' ? 10 : 20)
+                            }
+                        },
                         y: {
                             beginAtZero: true,
+                            grid: { color: colors.grid },
                             ticks: {
-                                callback: function (v) {
-                                    var av = Math.abs(v);
-                                    if (av >= 1) return av.toFixed(1) + ' Mbps';
-                                    var kbps = av * 1000;
-                                    if (kbps >= 1) return kbps.toFixed(0) + ' kbps';
-                                    return (kbps * 1000).toFixed(0) + ' bps';
-                                }
+                                color: colors.tick,
+                                callback: yTickCallback
                             }
                         }
                     }
@@ -784,6 +933,7 @@ cell.setAttribute('colspan', '5');
             filterDevices();
         }
 
+        updateThemeButton();
         fetchDevices();
         fetchAllHosts();
         fetchBatchTraffic();

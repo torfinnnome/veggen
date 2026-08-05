@@ -14,7 +14,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import _aggregate_history_rows, _aggregate_batch_rows
+from traffic_aggregate import aggregate_history_rows as _aggregate_history_rows
+from traffic_aggregate import aggregate_batch_rows as _aggregate_batch_rows
+from traffic_aggregate import aggregate_daily_rows as _aggregate_daily_rows
 
 
 # Bytes transferred at a constant rate over a period, snapshotted every
@@ -170,6 +172,42 @@ class HistoryBoundaryLossTests(unittest.TestCase):
         # The [600,900] traffic (300M) is lost: its start (600) < cutoff.
         self.assertEqual(total_up, 600_000_000)
         self.assertLess(total_up, self.RATE * 3 * self.SNAP)  # would be 900M with no loss
+
+
+class DailyRollupTests(unittest.TestCase):
+    """month/year periods read the daily rollup table, whose rows are absolute
+    per-day totals (no delta math). Daily rows map directly into buckets.
+    """
+
+    def test_daily_rows_sum_into_daily_buckets(self):
+        # 3 days, 1000 bytes up / 500 bytes down each, 86400s buckets.
+        rows = [
+            (0,           1000, 500),
+            (86400,       1000, 500),
+            (172800,      1000, 500),
+        ]
+        buckets, total_up, total_down = _aggregate_daily_rows(rows, 86400)
+        self.assertEqual(total_up, 3000)
+        self.assertEqual(total_down, 1500)
+        self.assertEqual(len(buckets), 3)
+        self.assertEqual(buckets[0]["up"], 1000)
+        self.assertEqual(buckets[2]["down"], 500)
+
+    def test_daily_rows_sum_into_weekly_buckets(self):
+        # 14 days of 1000 bytes/day, 604800s (weekly) buckets -> 2 buckets of 7000.
+        rows = [(d * 86400, 1000, 500) for d in range(14)]
+        buckets, total_up, total_down = _aggregate_daily_rows(rows, 604800)
+        self.assertEqual(total_up, 14000)
+        self.assertEqual(total_down, 7000)
+        self.assertEqual(len(buckets), 2)
+        self.assertEqual(buckets[0]["up"], 7000)
+        self.assertEqual(buckets[1]["up"], 7000)
+
+    def test_empty_input(self):
+        buckets, total_up, total_down = _aggregate_daily_rows([], 86400)
+        self.assertEqual(buckets, [])
+        self.assertEqual(total_up, 0)
+        self.assertEqual(total_down, 0)
 
 
 class BatchHistoryTests(unittest.TestCase):
