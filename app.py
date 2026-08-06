@@ -22,9 +22,6 @@ SSH_USER = os.environ.get("VEGGEN_SSH_USER", "veggen") # Use a restricted user i
 PASSWORD = os.environ.get("VEGGEN_PASSWORD", "") # Must be set via VEGGEN_PASSWORD env var
 DHCP_PREFIX = "veggen-" # Prefix for devices to manage
 
-_traffic_prev = {}
-_traffic_ts = 0.0
-
 # Simple in-memory rate limiter for login (failsafe against brute-force)
 _failed_logins = {}  # ip -> list of timestamps
 _RATE_LIMIT_ATTEMPTS = 10
@@ -57,92 +54,6 @@ def run_ssh_command(command):
 def sanitize_mac(mac):
     """Sanitizes MAC address for use in UCI rule names."""
     return mac.replace(":", "").lower()
-
-
-def _read_nlbwmon():
-    """Runs nlbw -c csv and returns {mac: {"rx": bytes, "tx": bytes}}.
-
-    nlbwmon reads conntrack counters, which the kernel flowtable synchronizes
-    when the flowtable definition includes the `counter` statement (fw4 default
-    since OpenWrt 23.05.0). This counts software-offloaded flows that nft meters
-    in the forward chain miss. rx = traffic to the host (download), tx = traffic
-    from the host (upload).
-    """
-    output = run_ssh_command('/usr/sbin/nlbw -c csv -g mac -o mac -q 2>/dev/null')
-    result = {}
-    for line in output.splitlines():
-        fields = line.split('\t')
-        if len(fields) < 6:
-            continue
-        mac = fields[0].strip().lower()
-        if not mac or mac == "00:00:00:00:00:00":
-            continue
-        try:
-            rx = int(fields[2])
-            tx = int(fields[4])
-        except ValueError:
-            continue
-        result[mac] = {"rx": rx, "tx": tx}
-    return result
-
-
-def _read_meters():
-    """Returns current readings as {"up": {mac: bytes}, "down": {mac: bytes}}.
-
-    up = traffic from the device (upload, nlbwmon tx), down = traffic to the
-    device (download, nlbwmon rx).
-    """
-    data = _read_nlbwmon()
-    return {
-        "up": {mac: v["tx"] for mac, v in data.items()},
-        "down": {mac: v["rx"] for mac, v in data.items()},
-    }
-
-
-def _traffic_delta():
-    """Compares current meter readings to previous, returns delta per MAC."""
-    global _traffic_prev, _traffic_ts
-
-    current = _read_meters()
-    now = time.time()
-
-    if not _traffic_prev:
-        _traffic_prev = current
-        _traffic_ts = now
-        return {}, 0.0
-
-    elapsed = max(now - _traffic_ts, 0.1)
-
-    delta = {}
-    all_macs = (set(_traffic_prev["up"]) | set(_traffic_prev["down"]) |
-                set(current["up"]) | set(current["down"]))
-    for mac in all_macs:
-        prev_up = _traffic_prev["up"].get(mac, 0)
-        prev_down = _traffic_prev["down"].get(mac, 0)
-        curr_up = current["up"].get(mac, 0)
-        curr_down = current["down"].get(mac, 0)
-
-        delta[mac] = {
-            "up": max(curr_up - prev_up, 0),
-            "down": max(curr_down - prev_down, 0),
-        }
-
-    _traffic_prev = current
-    _traffic_ts = now
-
-    return delta, elapsed
-
-
-def _bps_str(delta_bytes, elapsed):
-    """Formats bytes/s into human-readable string, returns rate string (e.g. '1.2 MB/s')."""
-    if elapsed <= 0:
-        return "0 B/s"
-    bps = delta_bytes / elapsed
-    if bps >= 1_000_000:
-        return f"{bps / 1_000_000:.1f} MB/s"
-    if bps >= 1_000:
-        return f"{bps / 1_000:.0f} KB/s"
-    return f"{bps:.0f} B/s"
 
 
 def get_devices():
@@ -405,52 +316,6 @@ def traffic_batch_history():
     except ValueError:
         return jsonify({"period": period, "macs": {}})
     return jsonify(data)
-
-
-@app.route("/api/traffic/summary")
-@login_required
-def traffic_summary():
-    """Returns real-time traffic rates for managed devices."""
-    devices = get_devices()
-    managed_macs = {dev["mac"] for dev in devices}
-
-    delta, elapsed = _traffic_delta()
-
-    if elapsed == 0:
-        return jsonify({})
-
-    result = {}
-    all_macs = managed_macs | set(delta.keys())
-    for mac in all_macs:
-        dev_delta = delta.get(mac, {"up": 0, "down": 0})
-        result[mac] = {
-            "up": dev_delta["up"],
-            "down": dev_delta["down"],
-            "up_text": _bps_str(dev_delta["up"], elapsed),
-            "down_text": _bps_str(dev_delta["down"], elapsed),
-        }
-
-    return jsonify(result)
-
-
-@app.route("/api/traffic/debug")
-@login_required
-def traffic_debug():
-    """Debug endpoint to see raw meter data and deltas."""
-    current = _read_meters()
-    delta, elapsed = _traffic_delta()
-    devices = get_devices()
-    managed_macs = {dev["mac"] for dev in devices}
-    return jsonify({
-        "managed_macs": list(managed_macs),
-        "meter_up_keys": list(current["up"].keys())[:5],
-        "meter_down_keys": list(current["down"].keys())[:5],
-        "delta_keys": list(delta.keys())[:5],
-        "delta_sample": dict(list(delta.items())[:2]),
-        "elapsed": elapsed,
-        "prev_ts_age": time.time() - _traffic_ts,
-    })
-
 
 @app.after_request
 def set_security_headers(response):
