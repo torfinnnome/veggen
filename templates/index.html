@@ -6,6 +6,8 @@
     <title>Veggen Management</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <script>
         // Apply saved theme before first paint to avoid a flash of the wrong theme.
         (function () {
@@ -183,6 +185,27 @@
         .sortable-header.active-sort {
             background: var(--pico-primary-background);
             font-weight: 700;
+        }
+        .zoom-controls {
+            display: flex;
+            gap: 2px;
+            justify-content: flex-end;
+            margin-top: 4px;
+        }
+        .zoom-btn {
+            font-size: 0.8em;
+            padding: 2px 8px;
+            border: 1px solid var(--pico-border-color);
+            border-radius: 4px;
+            background: var(--pico-background-color);
+            color: var(--pico-muted-color);
+            cursor: pointer;
+            line-height: 1;
+            margin: 0;
+        }
+        .zoom-btn:hover {
+            color: var(--pico-primary);
+            border-color: var(--pico-primary);
         }
     </style>
 </head>
@@ -403,6 +426,34 @@
             var canvas = document.createElement('canvas');
             cw.appendChild(canvas);
             container.appendChild(cw);
+            var zoomControls = document.createElement('div');
+            zoomControls.className = 'zoom-controls';
+            var zoomInBtn = document.createElement('button');
+            zoomInBtn.className = 'zoom-btn';
+            zoomInBtn.textContent = '+';
+            zoomInBtn.onclick = function () {
+                var ch = _charts[mac];
+                if (ch) { ch.zoom(0.8); }
+            };
+            zoomControls.appendChild(zoomInBtn);
+            var zoomOutBtn = document.createElement('button');
+            zoomOutBtn.className = 'zoom-btn';
+            zoomOutBtn.textContent = '\u2212';
+            zoomOutBtn.onclick = function () {
+                var ch = _charts[mac];
+                if (ch) { ch.zoom(1.25); }
+            };
+            zoomControls.appendChild(zoomOutBtn);
+            var zoomResetBtn = document.createElement('button');
+            zoomResetBtn.className = 'zoom-btn';
+            zoomResetBtn.textContent = '\u21bb';
+            zoomResetBtn.title = 'Reset zoom';
+            zoomResetBtn.onclick = function () {
+                var ch = _charts[mac];
+                if (ch) { ch.resetZoom(); }
+            };
+            zoomControls.appendChild(zoomResetBtn);
+            container.appendChild(zoomControls);
             td.appendChild(container);
 
             // Destroy previous chart for this MAC (not global)
@@ -527,7 +578,31 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    plugins: {
+                        legend: { display: false },
+                        zoom: {
+                            zoom: {
+                                drag: {
+                                    enabled: true,
+                                    threshold: 10,
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    borderColor: 'rgba(37, 99, 235, 0.5)',
+                                    borderWidth: 1
+                                },
+                                wheel: {
+                                    enabled: true,
+                                    modifierKey: 'shift'
+                                },
+                                mode: 'x',
+                                limit: { maxRange: { x: 10 } }
+                            },
+                            pan: {
+                                enabled: true,
+                                mode: 'x',
+                                modifierKey: 'shift'
+                            },
+                        }
+                    },
                     scales: {
                         x: {
                             grid: { display: false },
