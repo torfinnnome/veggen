@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from traffic_aggregate import aggregate_history_rows as _aggregate_history_rows
 from traffic_aggregate import aggregate_batch_rows as _aggregate_batch_rows
 from traffic_aggregate import aggregate_daily_rows as _aggregate_daily_rows
+from traffic_aggregate import _render_buckets as _render_buckets
+from traffic_aggregate import cmd_history as _cmd_history
+from traffic_aggregate import cmd_batch as _cmd_batch
 
 
 # Bytes transferred at a constant rate over a period, snapshotted every
@@ -252,6 +255,233 @@ class BatchHistoryTests(unittest.TestCase):
         # Only the non-reset deltas count: 300M (0->300) + 0 (reset clamped) + 300M (600->900) = 600M
         self.assertAlmostEqual(totals["aa:bb:cc:dd:ee:01"]["up"], 600_000_000, delta=1)
 
+class WindowedRenderTests(unittest.TestCase):
+    """_render_buckets(agg, bucket_size, start, end) zero-fills the full window.
+
+    The window [start, end) is supplied by the caller (app.py), computed in
+    the browser's local time so "today" spans 00:00 to now. The renderer must
+    cover the entire window — not just first-activity to last-activity — so a
+    partial day renders from midnight, and an empty day renders a flat line.
+    """
+
+    BUCKET = 900  # 15 minutes (day period)
+
+    def test_full_day_window_spans_midnight_to_end(self):
+        # Two snapshots at 10:00 and 14:00. Window is the full day
+        # [0, 86400). Renderer must fill all 96 buckets, not just 2.
+        agg = [
+            {"ts": (10 * 3600 // 900) * 900, "up": 1000, "down": 5000},
+            {"ts": (14 * 3600 // 900) * 900, "up": 2000, "down": 8000},
+        ]
+        filled = _render_buckets(agg, self.BUCKET, start=0, end=86400)
+        self.assertEqual(len(filled), 86400 // self.BUCKET)  # 96 buckets
+        self.assertEqual(filled[0]["ts"], 0)
+        self.assertEqual(filled[-1]["ts"], 86400 - self.BUCKET)
+        # The two activity buckets carry their values; the rest are zeros.
+        activity = {a["ts"] for a in agg}
+        for b in filled:
+            if b["ts"] in activity:
+                self.assertNotEqual(b["down"], 0)
+            else:
+                self.assertEqual(b["down"], 0)
+                self.assertEqual(b["up"], 0)
+
+    def test_partial_day_window_clamps_to_now(self):
+        # Window is [0, 54000) (00:00 to 15:00). Must fill exactly 60 buckets.
+        agg = [{"ts": 0, "up": 100, "down": 500}]
+        filled = _render_buckets(agg, self.BUCKET, start=0, end=54000)
+        self.assertEqual(len(filled), 54000 // self.BUCKET)  # 60 buckets
+        self.assertEqual(filled[0]["down"], 500)
+        self.assertEqual(filled[1]["down"], 0)
+        self.assertEqual(filled[-1]["ts"], 54000 - self.BUCKET)
+
+    def test_empty_window_fills_with_zeros(self):
+        # No data at all in the window: still fill the whole window with
+        # zeros so today renders a flat line instead of a blank chart.
+        filled = _render_buckets([], self.BUCKET, start=0, end=86400)
+        self.assertEqual(len(filled), 86400 // self.BUCKET)
+        self.assertTrue(all(b["up"] == 0 and b["down"] == 0 for b in filled))
+        self.assertTrue(all("up_mbps" in b and "down_mbps" in b for b in filled))
+
+    def test_prev_day_window_excludes_today(self):
+        # Window is yesterday [86400, 172800). A snapshot today at ts=170000
+        # must NOT appear; only yesterday's activity should render.
+        agg = [{"ts": 90000, "up": 1000, "down": 5000}]  # yesterday 01:00
+        filled = _render_buckets(agg, self.BUCKET, start=86400, end=172800)
+        self.assertEqual(len(filled), 86400 // self.BUCKET)
+        self.assertEqual(filled[0]["ts"], 86400)
+        self.assertEqual(filled[-1]["ts"], 172800 - self.BUCKET)
+        # Only the bucket containing ts=90000 has traffic.
+        activity = [b for b in filled if b["down"] != 0]
+        self.assertEqual(len(activity), 1)
+        self.assertEqual(activity[0]["down"], 5000)
+
+    def test_weekly_window_fills_daily_rollup(self):
+        # Month period (86400s buckets) over a 7-day window [0, 604800).
+        # Only 3 days have data; renderer must still fill all 7 day-buckets.
+        agg = [
+            {"ts": 0, "up": 1000, "down": 5000},
+            {"ts": 86400, "up": 2000, "down": 8000},
+            {"ts": 172800, "up": 1500, "down": 6000},
+        ]
+        filled = _render_buckets(agg, 86400, start=0, end=604800)
+        self.assertEqual(len(filled), 7)
+        self.assertEqual(filled[0]["ts"], 0)
+        self.assertEqual(filled[3]["down"], 0)  # day 4 had no data
+        self.assertEqual(filled[0]["down"], 5000)
+
+    def test_no_window_falls_back_to_activity_range(self):
+        # Backward compat: no start/end -> fill from first to last bucket,
+        # same behavior as before the window feature (existing callers).
+        agg = [
+            {"ts": 3600, "up": 100, "down": 500},
+            {"ts": 7200, "up": 200, "down": 800},
+        ]
+        filled = _render_buckets(agg, 3600)
+        self.assertEqual(len(filled), 2)
+        self.assertEqual(filled[0]["ts"], 3600)
+        self.assertEqual(filled[1]["ts"], 7200)
+
+class LiveTodayMergeTests(unittest.TestCase):
+    """Month/year views read the daily rollup, which only holds complete
+    *previous* days — today's traffic lives only in the raw snapshot table.
+    Without merging today's live raw delta-sum, month would report less than
+    a week inside the same month (the bug this class locks down).
+    """
+
+    MAC = "aa:bb:cc:dd:ee:00"
+
+    def _build_db(self, today_down, today_up=0, with_yesterday_daily=True,
+                  spurious_daily_today=False):
+        """Build a temp DB. today_down/today_up are today's traffic (bytes),
+        delivered as raw 5-min snapshots from midnight. Yesterday's traffic
+        (2 GB down / 200 MB up) is in the daily rollup only.
+        """
+        import os as _os
+        path = _os.environ.get("VEGGEN_DB", "/tmp/test_live_today.db")
+        import sqlite3, time
+        db = sqlite3.connect(path)
+        db.execute("DROP TABLE IF EXISTS mac_traffic")
+        db.execute("DROP TABLE IF EXISTS mac_traffic_daily")
+        db.execute(
+            "CREATE TABLE mac_traffic (ts INTEGER, mac TEXT, bytes_in INTEGER, "
+            "bytes_out INTEGER, PRIMARY KEY (ts, mac))"
+        )
+        db.execute("CREATE INDEX idx_mac_ts ON mac_traffic(mac, ts)")
+        db.execute(
+            "CREATE TABLE mac_traffic_daily (day INTEGER, mac TEXT, bytes_in INTEGER, "
+            "bytes_out INTEGER, PRIMARY KEY (day, mac))"
+        )
+        now = int(time.time())
+        today_mid = now - (now % 86400)
+        prev_day = today_mid - 86400
+        # Yesterday: daily rollup row only.
+        if with_yesterday_daily:
+            db.execute("INSERT INTO mac_traffic_daily VALUES (?,?,?,?)",
+                        (prev_day, self.MAC, 2_000_000_000, 200_000_000))
+        # Today: raw 5-min cumulative snapshots from midnight.
+        if today_down or today_up:
+            ts = today_mid
+            out = 0
+            inn = 0
+            # Even rate so the delta-sum is exactly today_down/today_up.
+            snaps = max(1, (now - today_mid) // 300)
+            rate_down = today_down / snaps if snaps else 0
+            rate_up = today_up / snaps if snaps else 0
+            for _ in range(snaps + 1):
+                db.execute("INSERT OR REPLACE INTO mac_traffic VALUES (?,?,?,?)",
+                            (ts, self.MAC, int(inn), int(out)))
+                ts += 300
+                out += int(rate_up * 300)
+                inn += int(rate_down * 300)
+        # Optional spurious daily row for today (double-count guard).
+        if spurious_daily_today:
+            db.execute("INSERT INTO mac_traffic_daily VALUES (?,?,?,?)",
+                        (today_mid, self.MAC, 10_000_000_000, 1_000_000_000))
+        db.commit()
+        db.close()
+        return path, now, today_mid
+
+    def test_month_includes_today_live_traffic(self):
+        path, now, today_mid = self._build_db(today_down=5_000_000_000)
+        import traffic_aggregate
+        old_db = traffic_aggregate.DB
+        traffic_aggregate.DB = path
+        try:
+            mo = _cmd_history(self.MAC, "month", today_mid - 30 * 86400, now)
+        finally:
+            traffic_aggregate.DB = old_db
+        # 2 GB yesterday + ~5 GB today = ~7 GB. Must be >= today's traffic.
+        self.assertGreater(mo["total_down"], 6_000_000_000,
+                           "month must include today's live traffic, not just rollup")
+
+    def test_month_never_less_than_week(self):
+        """The bug report: week 5.3 GB but month 2.9 GB. Month must be >= week
+        when the week window is inside the month window."""
+        path, now, today_mid = self._build_db(today_down=5_000_000_000)
+        import traffic_aggregate
+        old_db = traffic_aggregate.DB
+        traffic_aggregate.DB = path
+        try:
+            wk = _cmd_history(self.MAC, "week", today_mid - 7 * 86400, now)
+            mo = _cmd_history(self.MAC, "month", today_mid - 30 * 86400, now)
+        finally:
+            traffic_aggregate.DB = old_db
+        self.assertGreaterEqual(mo["total_down"], wk["total_down"],
+                                "month must never report less than a week inside it")
+
+    def test_past_month_excludes_today(self):
+        """A month window ending at today's midnight (exclusive) must not
+        include today's live traffic."""
+        path, now, today_mid = self._build_db(today_down=5_000_000_000)
+        import traffic_aggregate
+        old_db = traffic_aggregate.DB
+        traffic_aggregate.DB = path
+        try:
+            mo = _cmd_history(self.MAC, "month", today_mid - 30 * 86400, today_mid)
+        finally:
+            traffic_aggregate.DB = old_db
+        # Only yesterday's rollup (2 GB). No today.
+        self.assertAlmostEqual(mo["total_down"], 2_000_000_000, delta=1)
+
+    def test_no_double_count_with_daily_today_row(self):
+        """A spurious daily row for today must NOT inflate the month total —
+        the daily query is capped at today's midnight."""
+        path, now, today_mid = self._build_db(
+            today_down=5_000_000_000, spurious_daily_today=True)
+        import traffic_aggregate
+        old_db = traffic_aggregate.DB
+        traffic_aggregate.DB = path
+        try:
+            mo = _cmd_history(self.MAC, "month", today_mid - 30 * 86400, now)
+        finally:
+            traffic_aggregate.DB = old_db
+        # Must equal the version WITHOUT the spurious row (today from raw, not daily).
+        path2, _, _ = self._build_db(today_down=5_000_000_000, spurious_daily_today=False)
+        traffic_aggregate.DB = path2
+        try:
+            mo2 = _cmd_history(self.MAC, "month", today_mid - 30 * 86400, now)
+        finally:
+            traffic_aggregate.DB = old_db
+        self.assertEqual(mo["total_down"], mo2["total_down"])
+
+    def test_batch_month_includes_today(self):
+        """batch-history month columns must also include today's live traffic."""
+        path, now, today_mid = self._build_db(today_down=5_000_000_000)
+        import traffic_aggregate
+        old_db = traffic_aggregate.DB
+        traffic_aggregate.DB = path
+        try:
+            mo = _cmd_batch("month", today_mid - 30 * 86400, now)
+            wk = _cmd_batch("week", today_mid - 7 * 86400, now)
+        finally:
+            traffic_aggregate.DB = old_db
+        self.assertGreaterEqual(mo["macs"][self.MAC]["down"],
+                                wk["macs"][self.MAC]["down"])
+
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

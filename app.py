@@ -259,19 +259,30 @@ def traffic_history():
     """Returns aggregated traffic history for a device.
 
     Aggregation runs on the router (traffic_aggregate.py) so only the final
-    chart data crosses SSH, not the raw snapshot rows.
+    chart data crosses SSH, not the raw snapshot rows. The window [start, end)
+    is computed by the frontend in the browser's local time so "today" aligns
+    to the user's midnight rather than the router's UTC-internal clock.
     """
     mac = request.args.get("mac", "").lower()
     period = request.args.get("period", "day")
+    start = request.args.get("start", "")
+    end = request.args.get("end", "")
 
     if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
         return jsonify({"error": "Invalid MAC address"}), 400
     if period not in ("day", "week", "month", "year"):
         return jsonify({"error": "Invalid period"}), 400
+    # start/end flow into an SSH shell string, so they MUST be pure digits and
+    # bounded. Same security care as the MAC regex above.
+    if not re.fullmatch(r"\d{1,11}", start) or not re.fullmatch(r"\d{1,11}", end):
+        return jsonify({"error": "Invalid time window"}), 400
+    start_i, end_i = int(start), int(end)
+    if start_i >= end_i or end_i - start_i > 5 * 31536000:
+        return jsonify({"error": "Invalid time window"}), 400
 
     raw = run_ssh_command(
         f"python3 /usr/share/veggen/traffic_aggregate.py history "
-        f"--mac {mac} --period {period}"
+        f"--mac {mac} --period {period} --start {start_i} --end {end_i}"
     )
     if not raw:
         return jsonify(_empty_history(period, mac))
@@ -300,14 +311,24 @@ def traffic_batch_history():
     """Returns total traffic for all MACs in the selected period.
 
     Aggregation runs on the router (traffic_aggregate.py) so only the per-MAC
-    totals cross SSH, not the raw snapshot rows.
+    totals cross SSH, not the raw snapshot rows. The window [start, end) is
+    computed by the frontend in the browser's local time so "today" aligns to
+    the user's midnight rather than the router's UTC-internal clock.
     """
     period = request.args.get("period", "day")
+    start = request.args.get("start", "")
+    end = request.args.get("end", "")
     if period not in ("day", "week", "month", "year"):
         return jsonify({"error": "Invalid period"}), 400
+    if not re.fullmatch(r"\d{1,11}", start) or not re.fullmatch(r"\d{1,11}", end):
+        return jsonify({"error": "Invalid time window"}), 400
+    start_i, end_i = int(start), int(end)
+    if start_i >= end_i or end_i - start_i > 5 * 31536000:
+        return jsonify({"error": "Invalid time window"}), 400
 
     raw = run_ssh_command(
-        f"python3 /usr/share/veggen/traffic_aggregate.py batch --period {period}"
+        f"python3 /usr/share/veggen/traffic_aggregate.py batch "
+        f"--period {period} --start {start_i} --end {end_i}"
     )
     if not raw:
         return jsonify({"period": period, "macs": {}})

@@ -104,6 +104,39 @@
         }
         .detail-stats { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
         .detail-stats strong { font-weight: 700; }
+.period-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 13px;
+}
+.period-nav-label {
+    min-width: 140px;
+    text-align: center;
+    font-weight: 600;
+    color: var(--pico-color);
+}
+.period-nav-btn {
+    font-size: 0.8em;
+    padding: 2px 10px;
+    border: 1px solid var(--pico-border-color);
+    border-radius: 4px;
+    background: var(--pico-background-color);
+    color: var(--pico-muted-color);
+    cursor: pointer;
+    line-height: 1;
+    margin: 0;
+}
+.period-nav-btn:hover:not(:disabled) {
+    color: var(--pico-primary);
+    border-color: var(--pico-primary);
+}
+.period-nav-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
         .chart-container { position: relative; height: 200px; width: 100%; }
         .tab-bar {
             display: flex;
@@ -272,6 +305,65 @@
     <script>
         var _detailCache = {};
         var _charts = {};
+        // Per-host period-navigation state: period = day|week|month|year,
+        // offset = 0 (current period, clamped to now) or N periods back.
+        var _detailPeriod = {};
+        var _detailOffset = {};
+        var _MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+        // Compute the [start, end) epoch-second window for (period, offset)
+        // in the browser's local time, so "today" aligns to the user's
+        // midnight — not the router's UTC-internal clock. Week starts Monday.
+        function _periodWindow(period, offset) {
+            var now = new Date();
+            var start, end;
+            if (period === 'day') {
+                var d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+                start = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+                if (offset === 0) { end = now; } else { end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1); }
+            } else if (period === 'week') {
+                // Monday-start: JS getDay() is 0=Sun..6=Sat; shift so Mon=0.
+                var dow = (now.getDay() + 6) % 7;
+                var monThis = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow);
+                var mon = new Date(monThis.getFullYear(), monThis.getMonth(), monThis.getDate() - 7 * offset);
+                start = mon;
+                if (offset === 0) { end = now; } else { end = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 7); }
+            } else if (period === 'month') {
+                var m = now.getMonth() - offset;
+                var y = now.getFullYear();
+                while (m < 0) { m += 12; y -= 1; }
+                start = new Date(y, m, 1);
+                if (offset === 0) { end = now; } else { end = new Date(y, m + 1, 1); }
+            } else { // year
+                var yy = now.getFullYear() - offset;
+                start = new Date(yy, 0, 1);
+                if (offset === 0) { end = now; } else { end = new Date(yy + 1, 0, 1); }
+            }
+            return { start: Math.floor(start.getTime() / 1000), end: Math.floor(end.getTime() / 1000) };
+        }
+
+        // Human label for the current (period, offset): "Today, 9 Aug", etc.
+        function _periodLabel(period, offset) {
+            var w = _periodWindow(period, offset);
+            var s = new Date(w.start * 1000);
+            if (period === 'day') {
+                if (offset === 0) return 'Today, ' + s.getDate() + ' ' + _MON[s.getMonth()];
+                if (offset === 1) return 'Yesterday, ' + s.getDate() + ' ' + _MON[s.getMonth()];
+                return s.getDate() + ' ' + _MON[s.getMonth()];
+            }
+            if (period === 'week') {
+                var e = new Date((w.end - 1) * 1000);
+                return 'Week of ' + s.getDate() + ' ' + _MON[s.getMonth()]
+                    + ' – ' + e.getDate() + ' ' + _MON[e.getMonth()];
+            }
+            if (period === 'month') {
+                var label = _MON[s.getMonth()];
+                if (s.getFullYear() !== new Date().getFullYear()) label += ' ' + s.getFullYear();
+                return label;
+            }
+            return String(s.getFullYear());
+        }
+
 
         function _isDark() {
             return document.documentElement.getAttribute('data-theme') === 'dark';
@@ -313,7 +405,7 @@
             document.querySelectorAll('.detail-row[data-expanded="true"]').forEach(function (det) {
                 var mac = det.getAttribute('data-mac');
                 var data = _detailCache[mac];
-                if (data && data.period) _renderDetail(mac, data, data.period);
+                if (data && data.period) _renderDetail(mac, data, data.period, _detailOffset[mac] || 0);
             });
         }
 
@@ -337,9 +429,9 @@
             return row;
         }
 
-        async function _fetchHistory(mac, period) {
+        async function _fetchHistory(mac, period, start, end) {
             try {
-                var res = await fetch('/api/traffic/history?mac=' + mac + '&period=' + period);
+                var res = await fetch('/api/traffic/history?mac=' + mac + '&period=' + period + '&start=' + start + '&end=' + end);
                 var data = await res.json();
                 _detailCache[mac] = data;
                 return data;
@@ -365,11 +457,12 @@
                 det.style.display = '';
                 det.setAttribute('data-expanded', 'true');
                 (async function () {
-                    var period = 'day';
-                    var data = _detailCache[mac];
-                    if (!data) data = await _fetchHistory(mac, period);
-                    if (data && data.period) period = data.period;
-                    _renderDetail(mac, data || {}, period);
+                    _detailPeriod[mac] = _detailPeriod[mac] || 'day';
+                    _detailOffset[mac] = _detailOffset[mac] || 0;
+                    var period = _detailPeriod[mac];
+                    var w = _periodWindow(period, _detailOffset[mac]);
+                    var data = await _fetchHistory(mac, period, w.start, w.end);
+                    _renderDetail(mac, data || {}, period, _detailOffset[mac]);
                 })();
             } else if (det) {
                 det.style.display = 'none';
@@ -378,7 +471,7 @@
             }
         }
 
-        function _renderDetail(mac, data, period) {
+        function _renderDetail(mac, data, period, offset) {
             var det = document.querySelector('.detail-row[data-mac="' + mac + '"]');
             if (!det) return;
             var td = det.querySelector('td');
@@ -396,16 +489,60 @@
                     pill.addEventListener('click', function () {
                         pillsDiv.querySelectorAll('.period-pill').forEach(function (el) { el.classList.remove('active'); });
                         pill.classList.add('active');
+                        _detailPeriod[mac] = p;
+                        _detailOffset[mac] = 0;
                         _detailCache[mac] = null;
                         (async function () {
-                            var d = await _fetchHistory(mac, p);
-                            if (d) _renderDetail(mac, d, p);
+                            var w = _periodWindow(p, 0);
+                            var d = await _fetchHistory(mac, p, w.start, w.end);
+                            if (d) _renderDetail(mac, d, p, 0);
                         })();
                     });
                     pillsDiv.appendChild(pill);
                 })(periods[pi]);
             }
             container.appendChild(pillsDiv);
+            // Prev/next navigation between periods (days/weeks/months/years).
+            var navDiv = document.createElement('div');
+            navDiv.className = 'period-nav';
+            var prevBtn = document.createElement('button');
+            prevBtn.className = 'period-nav-btn';
+            prevBtn.textContent = '\u2039';
+            prevBtn.title = 'Previous ' + period;
+            prevBtn.onclick = function () {
+                var p = _detailPeriod[mac];
+                _detailOffset[mac] = (_detailOffset[mac] || 0) + 1;
+                var o = _detailOffset[mac];
+                _detailCache[mac] = null;
+                (async function () {
+                    var w = _periodWindow(p, o);
+                    var d = await _fetchHistory(mac, p, w.start, w.end);
+                    if (d) _renderDetail(mac, d, p, o);
+                })();
+            };
+            navDiv.appendChild(prevBtn);
+            var labelEl = document.createElement('span');
+            labelEl.className = 'period-nav-label';
+            labelEl.textContent = _periodLabel(period, offset || 0);
+            navDiv.appendChild(labelEl);
+            var nextBtn = document.createElement('button');
+            nextBtn.className = 'period-nav-btn';
+            nextBtn.textContent = '\u203a';
+            nextBtn.title = 'Next ' + period;
+            if (!offset || offset <= 0) nextBtn.disabled = true;
+            nextBtn.onclick = function () {
+                var p = _detailPeriod[mac];
+                _detailOffset[mac] = Math.max(0, (_detailOffset[mac] || 0) - 1);
+                var o = _detailOffset[mac];
+                _detailCache[mac] = null;
+                (async function () {
+                    var w = _periodWindow(p, o);
+                    var d = await _fetchHistory(mac, p, w.start, w.end);
+                    if (d) _renderDetail(mac, d, p, o);
+                })();
+            };
+            navDiv.appendChild(nextBtn);
+            container.appendChild(navDiv);
             var statsDiv = document.createElement('div');
             statsDiv.className = 'detail-stats';
             var downL = document.createElement('span');
@@ -460,7 +597,6 @@
             if (_charts[mac]) { _charts[mac].destroy(); delete _charts[mac]; }
             if (!data.buckets || data.buckets.length === 0) return;
 
-            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             var labels = data.buckets.map(function (bk) {
                 var d = new Date(bk.ts * 1000);
                 if (period === 'day') {
@@ -471,9 +607,9 @@
                 if (period === 'year') {
                     var oneJan = new Date(d.getFullYear(), 0, 1);
                     var weekNum = Math.ceil(((d - oneJan) / 86400000 + oneJan.getDay() + 1) / 7);
-                    return months[d.getMonth()] + ' ' + weekNum;
+                    return _MON[d.getMonth()] + ' ' + weekNum;
                 }
-                return months[d.getMonth()] + ' ' + d.getDate();
+                return _MON[d.getMonth()] + ' ' + d.getDate();
             });
 
             var colors = _chartColors();
@@ -636,8 +772,11 @@
         }
 
         async function fetchBatchTraffic() {
+            // Batch columns use the current period at offset 0 (clamped to
+            // now), so Day means since local midnight, not the last 24h.
+            var w = _periodWindow(_currentPeriod, 0);
             try {
-                var res = await fetch('/api/traffic/batch-history?period=' + _currentPeriod);
+                var res = await fetch('/api/traffic/batch-history?period=' + _currentPeriod + '&start=' + w.start + '&end=' + w.end);
                 var data = await res.json();
                 _batchTraffic = data.macs || {};
                 updateTrafficCells();

@@ -18,23 +18,12 @@ import argparse
 import json
 import os
 import sqlite3
-import sys
 import time
+import sys
 
 DB = os.environ.get("VEGGEN_DB", "/etc/veggen/traffic.db")
 
 BUCKET_SECONDS = {"day": 900, "week": 86400, "month": 86400, "year": 604800}
-PERIOD_SECONDS = {
-    "day": 86400,
-    "week": 604800,
-    "month": 2592000,
-    "year": 31536000,
-}
-
-
-def period_cutoff(period):
-    return time.time() - PERIOD_SECONDS[period]
-
 
 def aggregate_history_rows(rows, bucket_size, cutoff):
     """Per-bucket traffic totals via consecutive-delta sums.
@@ -110,6 +99,45 @@ def aggregate_batch_rows(rows, cutoff):
 RAW_PERIODS = {"day", "week"}
 DAILY_PERIODS = {"month", "year"}
 
+def _live_today_mac(db, mac, now):
+    """Live delta-sum of today's raw snapshots for one MAC.
+
+    The daily rollup table only holds *complete* previous days (the rollup
+    cron runs once/day at UTC midnight). Today's traffic exists only in the
+    raw snapshot table, so month/year views would miss it and report *less*
+    than a week view inside the same month. This returns today's
+    delta-summed totals as a single bucket keyed to today's UTC midnight.
+    Returns (today_midnight, up, down) or (0, 0, 0) if no raw rows today.
+    """
+    today_mid = now - (now % 86400)
+    rows = db.execute(
+        "SELECT ts, bytes_out, bytes_in FROM mac_traffic "
+        "WHERE mac = ? AND ts >= ? ORDER BY ts",
+        (mac, today_mid),
+    )
+    raw = [(r["ts"], r["bytes_out"], r["bytes_in"]) for r in rows]
+    buckets, total_up, total_down = aggregate_history_rows(raw, 86400, today_mid)
+    if not buckets:
+        return today_mid, 0, 0
+    return today_mid, total_up, total_down
+
+
+def _live_today_all_macs(db, now):
+    """Live delta-sum of today's raw snapshots for ALL MACs.
+
+    Returns {mac: {"up": int, "down": int}} for today only. Used by
+    batch-history month/year views so the device-list traffic columns
+    include today, not just rolled-up previous days.
+    """
+    today_mid = now - (now % 86400)
+    rows = db.execute(
+        "SELECT mac, ts, bytes_out, bytes_in FROM mac_traffic "
+        "WHERE ts >= ? ORDER BY mac, ts",
+        (today_mid,),
+    )
+    raw = [(r["mac"], r["ts"], r["bytes_out"], r["bytes_in"]) for r in rows]
+    return aggregate_batch_rows(raw, today_mid)
+
 
 def aggregate_daily_rows(rows, bucket_size):
     """Sum daily rollup rows into buckets.
@@ -134,22 +162,43 @@ def aggregate_daily_rows(rows, bucket_size):
     return buckets, total_up, total_down
 
 
-def _render_buckets(agg, bucket_size):
-    """Convert aggregated buckets to chart form with mbps + zero-filling."""
-    if not agg:
+def _render_buckets(agg, bucket_size, start=None, end=None):
+    """Convert aggregated buckets to chart form with mbps + zero-filling.
+
+    When start/end are given (epoch seconds, [start, end)), zero-fill across
+    the full window so a partial day (today, offset 0) spans 00:00 to now on
+    the x-axis rather than only first-activity to last-activity.
+    """
+    if not agg and start is None:
         return []
+    if not agg:
+        # No data in the window: fill the whole window with zeros so an empty
+        # today still renders a flat line instead of an early-return blank.
+        if end is None or end <= start:
+            return []
+        ts = (start // bucket_size) * bucket_size
+        end_bucket = (end // bucket_size) * bucket_size
+        filled = []
+        while ts < end_bucket:
+            filled.append({"ts": ts, "up": 0, "down": 0, "up_mbps": 0, "down_mbps": 0})
+            ts += bucket_size
+        return filled
     buckets = []
     for b in agg:
         up_mbps = round(b["up"] * 8 / bucket_size / 1_000_000, 3)
         down_mbps = round(b["down"] * 8 / bucket_size / 1_000_000, 3)
         buckets.append({"ts": b["ts"], "up": b["up"], "down": b["down"],
                         "up_mbps": up_mbps, "down_mbps": down_mbps})
-    first_ts = buckets[0]["ts"]
-    last_ts = buckets[-1]["ts"]
     bucket_map = {b["ts"]: b for b in buckets}
+    if start is not None and end is not None:
+        first_ts = (start // bucket_size) * bucket_size
+        end_bucket = (end // bucket_size) * bucket_size
+    else:
+        first_ts = buckets[0]["ts"]
+        end_bucket = buckets[-1]["ts"] + bucket_size
     filled = []
     ts = first_ts
-    while ts <= last_ts:
+    while ts < end_bucket:
         if ts in bucket_map:
             filled.append(bucket_map[ts])
         else:
@@ -158,8 +207,13 @@ def _render_buckets(agg, bucket_size):
     return filled
 
 
-def cmd_history(mac, period):
-    cutoff = int(period_cutoff(period))
+def cmd_history(mac, period, start, end):
+    """Aggregated history for one MAC over [start, end) (epoch seconds).
+
+    The window is computed by the caller (app.py) in the browser's local
+    time so that "today" aligns to the user's midnight — not the router's
+    UTC-internal clock. The router only filters and aggregates.
+    """
     bucket_size = BUCKET_SECONDS[period]
 
     db = sqlite3.connect(DB)
@@ -167,29 +221,43 @@ def cmd_history(mac, period):
     if period in RAW_PERIODS:
         rows = db.execute(
             "SELECT ts, bytes_out, bytes_in FROM mac_traffic "
-            "WHERE mac = ? AND ts >= ? ORDER BY ts",
-            (mac, cutoff),
+            "WHERE mac = ? AND ts >= ? AND ts < ? ORDER BY ts",
+            (mac, start, end),
         )
         raw = [(r["ts"], r["bytes_out"], r["bytes_in"]) for r in rows]
-        agg, total_up, total_down = aggregate_history_rows(raw, bucket_size, cutoff)
+        agg, total_up, total_down = aggregate_history_rows(raw, bucket_size, start)
     else:
+        now = int(time.time())
+        today_mid = now - (now % 86400)
+        # The daily rollup only holds complete previous days; today's traffic
+        # lives only in the raw snapshot table. Cap the daily query at today's
+        # midnight so a late/early rollup row for today can't double-count
+        # with the live-today merge below.
+        daily_end = min(end, today_mid)
         rows = db.execute(
             "SELECT day, bytes_out, bytes_in FROM mac_traffic_daily "
-            "WHERE mac = ? AND day >= ? ORDER BY day",
-            (mac, cutoff),
+            "WHERE mac = ? AND day >= ? AND day < ? ORDER BY day",
+            (mac, start, daily_end),
         )
         raw = [(r["day"], r["bytes_out"], r["bytes_in"]) for r in rows]
         agg, total_up, total_down = aggregate_daily_rows(raw, bucket_size)
-    db.close()
+        # Merge today's live delta-sum from raw snapshots so month/year views
+        # include today and never report less than a week view in the same month.
+        t_up, t_down = 0, 0
+        if today_mid < end:
+            _, t_up, t_down = _live_today_mac(db, mac, now)
+        if (t_up or t_down) and start <= today_mid < end:
+            agg.append({"ts": today_mid, "up": t_up, "down": t_down})
+            total_up += t_up
+            total_down += t_down
 
-    buckets = _render_buckets(agg, bucket_size)
+    buckets = _render_buckets(agg, bucket_size, start, end)
     if not buckets:
         return {"period": period, "mac": mac, "total_up": 0, "total_down": 0,
                 "avg_up_per_day": 0, "avg_down_per_day": 0, "buckets": []}
 
-    first_ts = buckets[0]["ts"]
-    last_ts = buckets[-1]["ts"]
-    span_days = max((last_ts - first_ts) / 86400, 1)
+    span_seconds = end - start
+    span_days = max(span_seconds / 86400, 1)
     return {
         "period": period,
         "mac": mac,
@@ -201,24 +269,28 @@ def cmd_history(mac, period):
     }
 
 
-def cmd_batch(period):
-    cutoff = int(period_cutoff(period))
-
+def cmd_batch(period, start, end):
+    """Per-MAC traffic totals over [start, end) (epoch seconds)."""
     db = sqlite3.connect(DB)
     db.row_factory = sqlite3.Row
     if period in RAW_PERIODS:
         rows = db.execute(
             "SELECT mac, ts, bytes_out, bytes_in FROM mac_traffic "
-            "WHERE ts >= ? ORDER BY mac, ts",
-            (cutoff,),
+            "WHERE ts >= ? AND ts < ? ORDER BY mac, ts",
+            (start, end),
         )
         raw = [(r["mac"], r["ts"], r["bytes_out"], r["bytes_in"]) for r in rows]
-        macs = aggregate_batch_rows(raw, cutoff)
+        macs = aggregate_batch_rows(raw, start)
     else:
+        now = int(time.time())
+        today_mid = now - (now % 86400)
+        # Cap the daily query at today's midnight so a rollup row for today
+        # can't double-count with the live-today merge below.
+        daily_end = min(end, today_mid)
         rows = db.execute(
             "SELECT mac, day, bytes_out, bytes_in FROM mac_traffic_daily "
-            "WHERE day >= ? ORDER BY mac, day",
-            (cutoff,),
+            "WHERE day >= ? AND day < ? ORDER BY mac, day",
+            (start, daily_end),
         )
         totals = {}
         for mac, day, out, inb in rows:
@@ -226,6 +298,14 @@ def cmd_batch(period):
             t["up"] += out
             t["down"] += inb
         macs = totals
+        # The daily rollup misses today (only complete previous days are
+        # rolled up). Merge today's live raw delta-sum so the device-list
+        # traffic columns include today.
+        if today_mid < end:
+            for mac, t in _live_today_all_macs(db, now).items():
+                dt = macs.setdefault(mac, {"up": 0, "down": 0})
+                dt["up"] += t["up"]
+                dt["down"] += t["down"]
     db.close()
 
     return {"period": period, "macs": macs}
@@ -238,16 +318,20 @@ def main():
     h = sub.add_parser("history")
     h.add_argument("--mac", required=True)
     h.add_argument("--period", required=True, choices=sorted(BUCKET_SECONDS))
+    h.add_argument("--start", required=True, type=int)
+    h.add_argument("--end", required=True, type=int)
 
     b = sub.add_parser("batch")
     b.add_argument("--period", required=True, choices=sorted(BUCKET_SECONDS))
+    b.add_argument("--start", required=True, type=int)
+    b.add_argument("--end", required=True, type=int)
 
     args = parser.parse_args()
 
     if args.mode == "history":
-        result = cmd_history(args.mac, args.period)
+        result = cmd_history(args.mac, args.period, args.start, args.end)
     else:
-        result = cmd_batch(args.period)
+        result = cmd_batch(args.period, args.start, args.end)
 
     json.dump(result, sys.stdout)
     print()
