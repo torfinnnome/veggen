@@ -4,6 +4,7 @@ import re
 import os
 import hmac
 import time
+import shlex
 from functools import wraps
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for
 
@@ -280,9 +281,14 @@ def traffic_history():
     if start_i >= end_i or end_i - start_i > 5 * 31536000:
         return jsonify({"error": "Invalid time window"}), 400
 
+    safe_mac = shlex.quote(mac)
+    safe_period = shlex.quote(period)
+    safe_start = shlex.quote(str(start_i))
+    safe_end = shlex.quote(str(end_i))
+
     raw = run_ssh_command(
-        f"python3 /usr/share/veggen/traffic_aggregate.py history "
-        f"--mac {mac} --period {period} --start {start_i} --end {end_i}"
+        "python3 /usr/share/veggen/traffic_aggregate.py history "
+        f"--mac {safe_mac} --period {safe_period} --start {safe_start} --end {safe_end}"
     )
     if not raw:
         return jsonify(_empty_history(period, mac))
