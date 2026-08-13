@@ -4,6 +4,7 @@ import re
 import os
 import hmac
 import time
+import shlex
 from functools import wraps
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for
 
@@ -35,10 +36,18 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-def run_ssh_command(command):
-    """Executes a command on the router via SSH. 
-    The command string should include 'sudo' where necessary.
+def run_ssh_command(*parts):
+    """Executes a shell command on the router via SSH.
+    Accepts a single complete command string or multiple string parts
+    that are safely joined with shlex.join.  Dynamic/user-derived values
+    should always be passed as separate parts so they are quoted.
     """
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        command = parts[0]
+    else:
+        command = shlex.join(parts)
     ssh_cmd = ["ssh", f"{SSH_USER}@{ROUTER_IP}", command]
     try:
         result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
@@ -80,7 +89,7 @@ def get_devices():
             rule_name = f"block_{sanitize_mac(mac)}"
             if mac:
                 # Run the shell logic as 'veggen', only sudo the uci command
-                status_cmd = f"sudo uci show firewall | grep -q {rule_name} && echo 'blocked' || echo 'online'"
+                status_cmd = f"sudo uci show firewall | grep -q {shlex.quote(rule_name)} && echo 'blocked' || echo 'online'"
                 status_output = run_ssh_command(status_cmd).strip()
                 is_blocked = (status_output == "blocked")
                 
@@ -223,23 +232,25 @@ def toggle_access():
         
         rule_name = f"block_{sanitize_mac(mac_norm)}"
         
+        q_rule = shlex.quote(rule_name)
+        q_mac = shlex.quote(mac_norm)
         if action == "block":
             commands.append(
                 f"sudo uci add firewall rule; "
-                f"sudo uci set firewall.@rule[-1].name={rule_name}; "
+                f"sudo uci set firewall.@rule[-1].name={q_rule}; "
                 f"sudo uci set firewall.@rule[-1].src=lan; "
-                f"sudo uci set firewall.@rule[-1].src_mac={mac_norm}; "
+                f"sudo uci set firewall.@rule[-1].src_mac={q_mac}; "
                 f"sudo uci set firewall.@rule[-1].target=DROP; "
                 f"sudo uci set firewall.@rule[-1].family=any; "
                 f"sudo uci set firewall.@rule[-1].enabled=1; "
-                f"sudo nft insert rule inet fw4 forward ether saddr {mac_norm} counter drop; "
-                f"sudo nft insert rule inet fw4 input ether saddr {mac_norm} counter drop"
+                f"sudo nft insert rule inet fw4 forward ether saddr {q_mac} counter drop; "
+                f"sudo nft insert rule inet fw4 input ether saddr {q_mac} counter drop"
             )
         else:
             commands.append(
-                f"for s in $(sudo uci show firewall | grep {rule_name} | cut -d. -f2 | cut -d= -f1 | uniq); do sudo uci delete firewall.$s; done; "
-                f"for h in $(sudo nft list chain inet fw4 forward | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 forward handle $h; done; "
-                f"for h in $(sudo nft list chain inet fw4 input | grep -i {mac_norm} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 input handle $h; done"
+                f"for s in $(sudo uci show firewall | grep {q_rule} | cut -d. -f2 | cut -d= -f1 | uniq); do sudo uci delete firewall.$s; done; "
+                f"for h in $(sudo nft list chain inet fw4 forward | grep -i {q_mac} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 forward handle $h; done; "
+                f"for h in $(sudo nft list chain inet fw4 input | grep -i {q_mac} | grep -o 'handle [0-9]*' | awk '{{print $2}}'); do sudo nft delete rule inet fw4 input handle $h; done"
             )
     
     if not commands:
@@ -281,8 +292,8 @@ def traffic_history():
         return jsonify({"error": "Invalid time window"}), 400
 
     raw = run_ssh_command(
-        f"python3 /usr/share/veggen/traffic_aggregate.py history "
-        f"--mac {mac} --period {period} --start {start_i} --end {end_i}"
+        "python3", "/usr/share/veggen/traffic_aggregate.py", "history",
+        "--mac", mac, "--period", period, "--start", str(start_i), "--end", str(end_i)
     )
     if not raw:
         return jsonify(_empty_history(period, mac))
@@ -327,8 +338,8 @@ def traffic_batch_history():
         return jsonify({"error": "Invalid time window"}), 400
 
     raw = run_ssh_command(
-        f"python3 /usr/share/veggen/traffic_aggregate.py batch "
-        f"--period {period} --start {start_i} --end {end_i}"
+        "python3", "/usr/share/veggen/traffic_aggregate.py", "batch",
+        "--period", period, "--start", str(start_i), "--end", str(end_i)
     )
     if not raw:
         return jsonify({"period": period, "macs": {}})
