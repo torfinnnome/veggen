@@ -338,6 +338,27 @@ def traffic_batch_history():
         return jsonify({"period": period, "macs": {}})
     return jsonify(data)
 
+@app.route("/api/interfaces")
+@login_required
+def api_interfaces():
+    """Returns the list of network interfaces with synthetic MACs and names.
+
+    The mapping is written by parse_nlbwmon.py (one row per interface, from
+    /sys/class/net/*). Logical names (WAN/LAN/etc.) are resolved from ubus
+    netifd by traffic_aggregate.py. The frontend uses the MAC to fetch
+    per-interface traffic via the existing /api/traffic/history endpoint.
+    """
+    raw = run_ssh_command(
+        "python3 /usr/share/veggen/traffic_aggregate.py interfaces"
+    )
+    if not raw:
+        return jsonify([])
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return jsonify([])
+    return jsonify(data)
+
 @app.after_request
 def set_security_headers(response):
     """Add security headers to every response."""

@@ -262,6 +262,7 @@
                 <div class="tab-bar-tabs">
                     <button class="tab-btn active" onclick="switchTab('managed')">Managed</button>
                     <button class="tab-btn" onclick="switchTab('allhosts')">All Hosts</button>
+                    <button class="tab-btn" onclick="switchTab('interfaces')">Interfaces</button>
                 </div>
                 <div class="search-input-wrap">
                     <input type="text" class="search-input" id="search-input" placeholder="Search devices..." oninput="filterDevices()">
@@ -296,6 +297,21 @@
                     </thead>
                     <tbody id="allhosts-tbody">
                         <tr><td colspan="5">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="interfaces-tab" style="display:none;">
+                <table id="interfaces-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable-header" onclick="sortInterfacesCol(0)">Name</th>
+                            <th class="sortable-header" style="width: 160px;" onclick="sortInterfacesCol(1)">MAC</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortInterfacesCol(2)">Traffic ↓</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortInterfacesCol(3)">Traffic ↑</th>
+                        </tr>
+                    </thead>
+                    <tbody id="interfaces-tbody">
+                        <tr><td colspan="4">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -616,8 +632,8 @@
             var chartType, downDataset, upDataset, xTicksMaxRotation, yTickCallback;
 
             if (period === 'day') {
-                // Diverging line — Mbps, no fill, thin lines
-                chartType = 'line';
+                // Diverging bar chart — Mbps per 15-min bucket
+                chartType = 'bar';
                 xTicksMaxRotation = 0;
                 yTickCallback = function (v) {
                     var av = Math.abs(v);
@@ -629,23 +645,15 @@
                 downDataset = {
                     label: 'Down',
                     data: data.buckets.map(function (bk) { return bk.down_mbps; }),
-                    borderColor: colors.down,
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 1.5,
+                    backgroundColor: colors.down,
+                    borderRadius: 2,
                     borderSkipped: false
                 };
                 upDataset = {
                     label: 'Up',
                     data: data.buckets.map(function (bk) { return -bk.up_mbps; }),
-                    borderColor: colors.up,
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 1.5,
+                    backgroundColor: colors.up,
+                    borderRadius: 2,
                     borderSkipped: false
                 };
             } else if (period === 'week' || period === 'month') {
@@ -672,8 +680,8 @@
                     borderSkipped: false
                 };
             } else {
-                // Year: diverging line with points — GB per week
-                chartType = 'line';
+                // Year: diverging bar chart — GB per week
+                chartType = 'bar';
                 xTicksMaxRotation = 0;
                 yTickCallback = function (v) {
                     var av = Math.abs(v);
@@ -682,25 +690,15 @@
                 downDataset = {
                     label: 'Down',
                     data: data.buckets.map(function (bk) { return bk.down / (1024 * 1024 * 1024); }),
-                    borderColor: colors.down,
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    tension: 0.2,
-                    pointRadius: 3,
-                    pointBackgroundColor: colors.down,
-                    borderWidth: 1.5,
+                    backgroundColor: colors.down,
+                    borderRadius: 2,
                     borderSkipped: false
                 };
                 upDataset = {
                     label: 'Up',
                     data: data.buckets.map(function (bk) { return -(bk.up / (1024 * 1024 * 1024)); }),
-                    borderColor: colors.up,
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    tension: 0.2,
-                    pointRadius: 3,
-                    pointBackgroundColor: colors.up,
-                    borderWidth: 1.5,
+                    backgroundColor: colors.up,
+                    borderRadius: 2,
                     borderSkipped: false
                 };
             }
@@ -797,6 +795,7 @@
                 el.textContent = (t && t.up > 0) ? _formatBytes(t.up) : '';
             });
             sortAllHosts();
+            if (document.getElementById('interfaces-tab').style.display !== 'none') sortInterfaces();
         }
 
         function sortAllHostsCol(col) {
@@ -870,6 +869,8 @@
             document.querySelector('.tab-btn[onclick="switchTab(\'' + tab + '\')"]').classList.add('active');
             document.getElementById('managed-tab').style.display = tab === 'managed' ? '' : 'none';
             document.getElementById('allhosts-tab').style.display = tab === 'allhosts' ? '' : 'none';
+            document.getElementById('interfaces-tab').style.display = tab === 'interfaces' ? '' : 'none';
+            if (tab === 'interfaces') fetchInterfaces();
         }
 
         async function fetchAllHosts() {
@@ -921,6 +922,117 @@ cell.setAttribute('colspan', '5');
                 console.error('Error fetching all hosts:', e);
             }
         }
+
+        var _interfaces = [];
+        var _interfacesSort = { col: -1, dir: 'desc' };
+
+        async function fetchInterfaces() {
+            try {
+                var res = await fetch('/api/interfaces');
+                _interfaces = await res.json();
+                renderInterfaces();
+                // Traffic columns: reuse the batch fetch already loaded for all-hosts.
+                updateTrafficCells();
+            } catch (e) {
+                console.error('Error fetching interfaces:', e);
+            }
+        }
+
+        function renderInterfaces() {
+            var tbody = document.getElementById('interfaces-tbody');
+            tbody.innerHTML = '';
+            if (_interfaces.length === 0) {
+                var row = document.createElement('tr');
+                var cell = document.createElement('td');
+                cell.setAttribute('colspan', '4');
+                cell.textContent = 'No interfaces found.';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+                return;
+            }
+            _interfaces.forEach(function(iface) {
+                var tr = document.createElement('tr');
+                tr.className = 'device-row';
+                var nameTd = document.createElement('td');
+                nameTd.className = 'device-name';
+                nameTd.setAttribute('data-mac', iface.mac);
+                nameTd.textContent = (iface.name && iface.name !== iface.iface) ? iface.name + ' (' + iface.iface + ')' : iface.iface;
+                tr.appendChild(nameTd);
+                var macTd = document.createElement('td');
+                macTd.textContent = iface.mac;
+                tr.appendChild(macTd);
+                var downTd = document.createElement('td');
+                downTd.className = 'traffic-down';
+                downTd.setAttribute('data-mac', iface.mac);
+                tr.appendChild(downTd);
+                var upTd = document.createElement('td');
+                upTd.className = 'traffic-up';
+                upTd.setAttribute('data-mac', iface.mac);
+                tr.appendChild(upTd);
+                tbody.appendChild(tr);
+                nameTd.addEventListener('click', function() {
+                    toggleDetail({ mac: iface.mac, _parentTr: tr });
+                });
+                _detailCache[iface.mac] = _detailCache[iface.mac] || null;
+            });
+            sortInterfaces();
+        }
+
+        function sortInterfacesCol(col) {
+            if (_interfacesSort.col === col) {
+                _interfacesSort.dir = _interfacesSort.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+                _interfacesSort.col = col;
+                _interfacesSort.dir = col >= 2 ? 'desc' : 'asc';
+            }
+            sortInterfaces();
+        }
+
+        function sortInterfaces() {
+            var tbody = document.getElementById('interfaces-tbody');
+            var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+            if (rows.length === 0 || !rows[0].querySelector('.device-name')) return;
+            // Detach any open detail rows before sorting.
+            var details = {};
+            rows.forEach(function(r) {
+                var mac = r.querySelector('.device-name') && r.querySelector('.device-name').getAttribute('data-mac');
+                var next = r.nextElementSibling;
+                if (mac && next && next.className && next.className.indexOf('detail-row') !== -1) {
+                    details[mac] = next;
+                    next.remove();
+                }
+            });
+            var col = _interfacesSort.col;
+            var dir = _interfacesSort.dir === 'asc' ? 1 : -1;
+            rows.sort(function(a, b) {
+                var va = a.children[col] ? a.children[col].textContent : '';
+                var vb = b.children[col] ? b.children[col].textContent : '';
+                if (col >= 2) {
+                    // Traffic columns: sort by numeric value via the batch map.
+                    var ma = a.querySelector('.device-name').getAttribute('data-mac').toLowerCase();
+                    var mb = b.querySelector('.device-name').getAttribute('data-mac').toLowerCase();
+                    va = (_batchTraffic[ma] && _batchTraffic[ma].down) || 0;
+                    vb = (_batchTraffic[mb] && _batchTraffic[mb].down) || 0;
+                    if (col === 3) { va = (_batchTraffic[ma] && _batchTraffic[ma].up) || 0; vb = (_batchTraffic[mb] && _batchTraffic[mb].up) || 0; }
+                }
+                if (va < vb) return -1 * dir;
+                if (va > vb) return 1 * dir;
+                return 0;
+            });
+            rows.forEach(function(r) {
+                tbody.appendChild(r);
+                var mac = r.querySelector('.device-name').getAttribute('data-mac');
+                if (details[mac]) tbody.appendChild(details[mac]);
+            });
+            var headers = tbody.parentNode.querySelectorAll('.sortable-header');
+            var baseLabels = ['Name', 'MAC', 'Traffic \u2193', 'Traffic \u2191'];
+            headers.forEach(function(th, i) {
+                th.textContent = baseLabels[i] || th.textContent;
+                if (_interfacesSort.col === i) th.classList.add('active-sort');
+                else th.classList.remove('active-sort');
+            });
+        }
+
 
         async function fetchDevices() {
             const section = document.getElementById('device-list');
@@ -1142,6 +1254,7 @@ cell.setAttribute('colspan', '5');
             });
             await fetchDevices();
             await fetchAllHosts();
+            await fetchInterfaces();
             await fetchBatchTraffic();
             document.getElementById('search-input').value = query;
             filterDevices();

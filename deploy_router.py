@@ -22,8 +22,17 @@ import os
 # are cumulative within the current accounting period (monthly by default), so
 # the app's consecutive-delta aggregation works unchanged; resets at period
 # rollover or daemon restart are handled by the app's max(curr - prev, 0).
+#
+# Also captures cumulative byte counters for EVERY network interface (except
+# loopback) from /sys/class/net/*/statistics. Each interface is stored as a
+# row in mac_traffic under a deterministic synthetic MAC (locally-administered,
+# 02:-prefixed, SHA-1 of the interface name) so the existing aggregation,
+# rollup, and plot code work unchanged. An iface_mac table maps the synthetic
+# MAC back to the interface name for the frontend.
 PARSE_NLBWMON_PY = r"""import csv
+import hashlib
 import io
+import os
 import sqlite3
 import subprocess
 import sys
@@ -48,8 +57,49 @@ def parse():
             continue
     return rows
 
+def _iface_mac(name):
+    '''Deterministic locally-administered MAC for an interface name.
+
+    The 02: prefix sets the locally-administered bit so it can never collide
+    with a real hardware MAC (nlbwmon emits real NIC MACs). SHA-1 of the name
+    gives a stable mapping, so the same interface always maps to the same MAC
+    across snapshots and redeploys.
+    '''
+    h = hashlib.sha1(name.encode()).hexdigest()[:12]
+    octets = [h[i:i+2] for i in range(0, 12, 2)]
+    octets[0] = '02'  # locally-administered bit; never a real hardware MAC
+    return ':'.join(octets)
+
+def parse_interfaces():
+    '''Read cumulative rx/tx byte counters for every interface except lo.
+
+    Returns {interface_name: (rx_bytes, tx_bytes)}. Missing stats files
+    (virtual ifaces without counters) are skipped.
+    '''
+    rows = {}
+    base = '/sys/class/net'
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return rows
+    for name in names:
+        if name == 'lo':
+            continue
+        rxp = os.path.join(base, name, 'statistics', 'rx_bytes')
+        txp = os.path.join(base, name, 'statistics', 'tx_bytes')
+        try:
+            with open(rxp) as f:
+                rx = int(f.read().strip())
+            with open(txp) as f:
+                tx = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        rows[name] = (rx, tx)
+    return rows
+
 ts = int(sys.argv[1])
 data = parse()
+ifaces = parse_interfaces()
 
 db = sqlite3.connect('/etc/veggen/traffic.db')
 cur = db.cursor()
@@ -59,11 +109,22 @@ cur.execute(
     'PRIMARY KEY (ts, mac))'
 )
 cur.execute('CREATE INDEX IF NOT EXISTS idx_mac_ts ON mac_traffic(mac, ts)')
+cur.execute(
+    'CREATE TABLE IF NOT EXISTS iface_mac ('
+    'mac TEXT PRIMARY KEY, iface TEXT)'
+)
 for mac, (rx, tx) in data.items():
     cur.execute(
         'INSERT OR REPLACE INTO mac_traffic (ts, mac, bytes_in, bytes_out) VALUES (?, ?, ?, ?)',
         (ts, mac, rx, tx),
     )
+for name, (rx, tx) in ifaces.items():
+    mac = _iface_mac(name)
+    cur.execute(
+        'INSERT OR REPLACE INTO mac_traffic (ts, mac, bytes_in, bytes_out) VALUES (?, ?, ?, ?)',
+        (ts, mac, rx, tx),
+    )
+    cur.execute('INSERT OR REPLACE INTO iface_mac (mac, iface) VALUES (?, ?)', (mac, name))
 db.commit()
 db.close()
 """
@@ -72,6 +133,24 @@ SNAPSHOT_SH = r"""#!/bin/sh
 TS=$(date +%s)
 mkdir -p /etc/veggen
 python3 /usr/share/veggen/parse_nlbwmon.py "$TS"
+
+# Dump logical interface names (wan/lan/etc.) from ubus netifd to a
+# world-readable file. traffic_aggregate.py reads this as the veggen
+# user, who can't reach ubus or /etc/config/network directly.
+ubus call network.interface dump 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    mapping = {}
+    for e in data.get("interface", []):
+        if not e.get("up"): continue
+        dev = e.get("l3_device") or e.get("device")
+        if dev: mapping[dev] = e.get("interface") or dev
+    with open("/etc/veggen/iface_names.json", "w") as f:
+        json.dump(mapping, f)
+except Exception:
+    pass
+' && chmod 0644 /etc/veggen/iface_names.json 2>/dev/null
 
 # Two-tier retention, run once per day:
 #   1. Roll up the previous day's raw 5-min snapshots into per-MAC daily

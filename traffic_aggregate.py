@@ -309,6 +309,45 @@ def cmd_batch(period, start, end):
     db.close()
 
     return {"period": period, "macs": macs}
+def _iface_names():
+    """Map device name -> logical interface name.
+
+    Reads /etc/veggen/iface_names.json, written by the root-run snapshot
+    cron (ubus call network.interface dump -> {device: "wan"}). The veggen
+    user can't reach ubus or /etc/config/network directly, so the snapshot
+    script dumps the mapping to a world-readable file. Returns {} if the
+    file is missing or unreadable (interfaces keep their raw kernel name).
+    """
+    try:
+        with open("/etc/veggen/iface_names.json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_interfaces():
+    """List all network interfaces with their synthetic MACs and friendly names.
+
+    Reads the iface_mac mapping table written by parse_nlbwmon.py. Resolves
+    logical names (wan/lan/guest/etc.) from /etc/veggen/iface_names.json,
+    dumped by the root-run snapshot cron. Returns [{iface, mac, name}]
+    sorted by interface name. 'name' is the friendly label when mapped,
+    else the raw iface.
+    """
+    db = sqlite3.connect(DB)
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT iface, mac FROM iface_mac ORDER BY iface").fetchall()
+    db.close()
+    dev_names = _iface_names()
+    result = []
+    for r in rows:
+        iface = r["iface"]
+        result.append({
+            "iface": iface,
+            "mac": r["mac"],
+            "name": dev_names.get(iface, iface),
+        })
+    return result
 
 
 def main():
@@ -326,12 +365,16 @@ def main():
     b.add_argument("--start", required=True, type=int)
     b.add_argument("--end", required=True, type=int)
 
+    sub.add_parser("interfaces")
+
     args = parser.parse_args()
 
     if args.mode == "history":
         result = cmd_history(args.mac, args.period, args.start, args.end)
-    else:
+    elif args.mode == "batch":
         result = cmd_batch(args.period, args.start, args.end)
+    else:
+        result = cmd_interfaces()
 
     json.dump(result, sys.stdout)
     print()
