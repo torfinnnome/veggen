@@ -38,16 +38,14 @@ def login_required(f):
 
 def run_ssh_command(*parts):
     """Executes a shell command on the router via SSH.
-    Accepts a single complete command string or multiple string parts
-    that are safely joined with shlex.join.  Dynamic/user-derived values
-    should always be passed as separate parts so they are quoted.
+    Command components must be passed as separate string parts; they are
+    safely joined with shlex.join before being sent to SSH.
     """
     if not parts:
         return ""
-    if len(parts) == 1:
-        command = parts[0]
-    else:
-        command = shlex.join(parts)
+    if any((not isinstance(p, str)) or p == "" for p in parts):
+        return ""
+    command = shlex.join(parts)
     ssh_cmd = ["ssh", f"{SSH_USER}@{ROUTER_IP}", command]
     try:
         result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
