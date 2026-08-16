@@ -20,6 +20,11 @@ app.config.update(
 
 ROUTER_IP = os.environ.get("VEGGEN_ROUTER_IP", "192.168.0.1")
 SSH_USER = os.environ.get("VEGGEN_SSH_USER", "veggen") # Use a restricted user instead of root
+# How to reach the router: "ssh" (default) or "local" (the app runs on the
+# router itself and executes commands directly as the current user).
+MODE = os.environ.get("VEGGEN_MODE", "ssh").lower()
+if MODE not in ("ssh", "local"):
+    raise SystemExit(f"Invalid VEGGEN_MODE={MODE!r}; expected 'ssh' or 'local'")
 PASSWORD = os.environ.get("VEGGEN_PASSWORD", "") # Must be set via VEGGEN_PASSWORD env var
 DHCP_PREFIX = "veggen-" # Prefix for devices to manage
 
@@ -36,8 +41,13 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-def run_ssh_command(*parts):
-    """Executes a shell command on the router via SSH.
+def run_router_command(*parts):
+    """Executes a shell command on the router and returns its stdout.
+
+    The command is interpreted by the router's /bin/sh, either over SSH
+    (VEGGEN_MODE=ssh, the default) or directly on the router itself
+    (VEGGEN_MODE=local), so pipes, && and sudo work in both modes.
+
     Accepts a single complete command string or multiple string parts
     that are safely joined with shlex.join.  Dynamic/user-derived values
     should always be passed as separate parts so they are quoted.
@@ -48,16 +58,19 @@ def run_ssh_command(*parts):
         command = parts[0]
     else:
         command = shlex.join(parts)
-    ssh_cmd = ["ssh", f"{SSH_USER}@{ROUTER_IP}", command]
+    if MODE == "local":
+        argv = ["sh", "-c", command]
+    else:
+        argv = ["ssh", f"{SSH_USER}@{ROUTER_IP}", command]
     try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         if result.stderr:
             filtered_stderr = "\n".join([l for l in result.stderr.splitlines() if "[!]" not in l])
             if filtered_stderr:
-                print(f"SSH Debug (stderr): {filtered_stderr}")
+                print(f"Router Debug (stderr): {filtered_stderr}")
         return result.stdout
     except Exception as e:
-        print(f"Error executing SSH command: {e}")
+        print(f"Error executing router command: {e}")
         return ""
 
 def sanitize_mac(mac):
@@ -68,7 +81,7 @@ def sanitize_mac(mac):
 def get_devices():
     """Fetches DHCP static hosts and their block status."""
     # uci show usually requires sudo to read /etc/config/firewall
-    dhcp_output = run_ssh_command("sudo uci show dhcp")
+    dhcp_output = run_router_command("sudo uci show dhcp")
     if not dhcp_output:
         print("DEBUG: No output from uci show dhcp")
     
@@ -90,7 +103,7 @@ def get_devices():
             if mac:
                 # Run the shell logic as 'veggen', only sudo the uci command
                 status_cmd = f"sudo uci show firewall | grep -q {shlex.quote(rule_name)} && echo 'blocked' || echo 'online'"
-                status_output = run_ssh_command(status_cmd).strip()
+                status_output = run_router_command(status_cmd).strip()
                 is_blocked = (status_output == "blocked")
                 
                 parts = name.split("-")
@@ -115,7 +128,7 @@ def get_all_hosts():
     result = {}
 
     # 1. Static hosts from uci
-    dhcp_output = run_ssh_command("sudo uci show dhcp")
+    dhcp_output = run_router_command("sudo uci show dhcp")
     if dhcp_output:
         hosts = {}
         for line in dhcp_output.splitlines():
@@ -133,7 +146,7 @@ def get_all_hosts():
                 result[mac] = {"name": name, "ip": ip, "mac": mac}
 
     # 2. Dynamic leases from /tmp/dhcp.leases
-    leases_output = run_ssh_command("cat /tmp/dhcp.leases 2>/dev/null")
+    leases_output = run_router_command("cat /tmp/dhcp.leases 2>/dev/null")
     if leases_output:
         for line in leases_output.splitlines():
             parts = line.split()
@@ -260,7 +273,7 @@ def toggle_access():
     full_command = " && ".join(commands)
     full_command += "; sudo uci commit firewall; sudo /etc/init.d/firewall reload"
     
-    run_ssh_command(full_command)
+    run_router_command(full_command)
     return jsonify({"success": True})
 
 
@@ -291,7 +304,7 @@ def traffic_history():
     if start_i >= end_i or end_i - start_i > 5 * 31536000:
         return jsonify({"error": "Invalid time window"}), 400
 
-    raw = run_ssh_command(
+    raw = run_router_command(
         "python3", "/usr/share/veggen/traffic_aggregate.py", "history",
         "--mac", mac, "--period", period, "--start", str(start_i), "--end", str(end_i)
     )
@@ -337,7 +350,7 @@ def traffic_batch_history():
     if start_i >= end_i or end_i - start_i > 5 * 31536000:
         return jsonify({"error": "Invalid time window"}), 400
 
-    raw = run_ssh_command(
+    raw = run_router_command(
         "python3", "/usr/share/veggen/traffic_aggregate.py", "batch",
         "--period", period, "--start", str(start_i), "--end", str(end_i)
     )
@@ -359,7 +372,7 @@ def api_interfaces():
     netifd by traffic_aggregate.py. The frontend uses the MAC to fetch
     per-interface traffic via the existing /api/traffic/history endpoint.
     """
-    raw = run_ssh_command(
+    raw = run_router_command(
         "python3 /usr/share/veggen/traffic_aggregate.py interfaces"
     )
     if not raw:
