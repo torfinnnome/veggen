@@ -1,19 +1,21 @@
 # Veggen
 
-A simple web application to manage internet access for selected devices on an OpenWrt router.
+A simple web application to manage internet access for selected devices on an OpenWrt router, with optional per-device traffic accounting.
 
 ## Features
-- Lists DHCP static hosts starting with the prefix `veggen-` (configurable).
+- Lists DHCP static hosts starting with the prefix `veggen-` (change `DHCP_PREFIX` in `app.py` to use a different prefix), grouped by kid.
 - Displays real-time internet access status (Online/Blocked).
-- Simple toggle to block or unblock internet access using MAC-based firewall rules.
-- **Optional traffic accounting**: per-device bandwidth usage with historical diverging area charts (download/upload over time).
-- No database required; uses the router's UCI configuration as the source of truth.
+- Per-device toggles plus a per-kid bulk switch to block or unblock internet access using MAC-based firewall rules.
+- **All Hosts** view: every host on the network (static DHCP entries and dynamic leases) with traffic columns.
+- **Interfaces** view: per-interface traffic (WAN/LAN, etc.).
+- **Optional traffic accounting**: per-device bandwidth usage with historical diverging bar charts (download/upload over time) for day/week/month/year periods, period navigation, drag-to-zoom, live search, and dark mode.
+- No database required for the core app; uses the router's UCI configuration as the source of truth (traffic accounting keeps a small SQLite database on the router).
 
 ## Prerequisites
 - **OpenWrt Router**: Developed and tested on version **23.05.3**.
 - **Compatibility**: Works with OpenWrt 22.03+ (Firewall4/nftables).
 - **SSH Access**: Passwordless SSH access must be configured from the machine running this app to the router's `veggen` user.
-- **Python 3**: Installed on the host machine.
+- **Python 3.11+**: Installed on the host machine (or let `uv` manage it).
 
 ## Setup Router
 To avoid running the app as `root`, create a restricted `veggen` user on your router:
@@ -53,17 +55,36 @@ uci commit dhcp
 ```
 
 ## Setup & Run
-1. Install dependencies and run the application:
+1. Configure the application:
+    ```bash
+    export VEGGEN_PASSWORD="secret"      # required: password for the web login
+    export VEGGEN_ROUTER_IP=192.168.0.1  # optional (default shown)
+    export VEGGEN_SSH_USER=veggen        # optional (default shown)
+    ```
+    Without `VEGGEN_PASSWORD` the login page shows "Server misconfigured".
+
+2. Install dependencies and run the application:
     ```bash
     uv run app.py
     ```
 
-2. Access the web interface:
-    Open your browser and navigate to `http://localhost:5000`.
+3. Access the web interface:
+    Open your browser, navigate to `http://localhost:5000`, and log in. The app binds to `0.0.0.0`, so it is also reachable from other devices on your LAN. Login is rate-limited (10 attempts per 60 s per IP).
+
+## Web interface
+Three tabs:
+- **Managed**: `veggen-` devices grouped by kid (`veggen-<kid>-<device>`). Toggle a single device or the whole group with the kid-level switch.
+- **All Hosts**: every host on the network (static DHCP hosts plus dynamic leases from `/tmp/dhcp.leases`, deduplicated by MAC).
+- **Interfaces**: per-interface traffic (WAN/LAN, ...), using synthetic MACs that map back to the logical interface name.
+
+Controls:
+- **Period selector** (Day/Week/Month/Year) sets the window for the traffic columns; "Day" means since local midnight.
+- Expanding a device row opens a detail chart with period pills, prev/next period navigation, and zoom (drag a region or use the +/−/reset buttons).
+- **Search** filters by name, IP, or MAC; the reload button refetches all data; the theme toggle (dark/light) is remembered per browser.
 
 ## Traffic Accounting (Optional)
 
-Track per-device bandwidth usage with real-time speeds and historical charts.
+Track per-device and per-interface bandwidth usage with historical charts (period totals — "Day" means since local midnight).
 
 ### Deploy to Router
 
@@ -80,8 +101,9 @@ Track per-device bandwidth usage with real-time speeds and historical charts.
 This does the following (idempotent — safe to rerun):
 - Installs and starts `nlbwmon` (conntrack-based accounting)
 - Configures nlbwmon to monitor the LAN subnet
-- Deploys `parse_nlbwmon.py` snapshot script to `/usr/share/veggen/`
+- Deploys `parse_nlbwmon.py` (nlbwmon counters plus cumulative byte counters for every network interface) and the `traffic-snapshot.sh` cron entrypoint to `/usr/share/veggen/`
 - Deploys `traffic_aggregate.py` aggregation helper to `/usr/share/veggen/`
+- The snapshot script also dumps logical interface names (WAN/LAN, ...) from ubus netifd to `/etc/veggen/iface_names.json` for the Interfaces view
 - Creates `/etc/veggen/traffic.db` SQLite database
 - Adds cron job (every 5 minutes) to `/etc/crontabs/root`
 - Removes the obsolete nft meter table and `firewall.user` hook
@@ -125,14 +147,17 @@ you want. Once per day the snapshot script:
    the freed space.
 
 The `day` and `week` charts read the raw table (fine-grained buckets); the
-`month` and `year` charts read the daily table (one value per day/week).
+`month` and `year` charts read the daily table (one value per day/week) and
+merge in today's live delta-sum from the raw table, so they never report less
+than the `week` chart within the same window.
 Override the raw window with the `VEGGEN_RETENTION_SECONDS` environment
-variable (default `1209600`).
+variable on the router (read by the snapshot script; default `1209600`), e.g.
+by adding it to the cron entry in `/etc/crontabs/root`.
 
 ## How it works
-- **Fetching**: The app runs `uci show dhcp` via SSH to find hosts with the configured prefix.
+- **Fetching**: The app runs `uci show dhcp` via SSH to find managed hosts (configured prefix); the All Hosts view additionally reads dynamic leases from `/tmp/dhcp.leases`.
 - **Status Check**: It checks for the presence of a firewall rule named `block_<sanitized_mac>`.
 - **Blocking**: 
   - Adds a persistent UCI firewall rule.
-  - Instantly inserts a high-priority `nft` rule to bypass "established" connection checks.
-- **Unblocking**: Cleans up both the `nft` rule and the UCI configuration.
+  - Instantly inserts high-priority `nft` rules into both the `inet fw4 forward` and `inet fw4 input` chains, so new connections are dropped without waiting for the "established" state.
+- **Unblocking**: Deletes the `nft` rules from both chains, removes the UCI rule, commits, and reloads the firewall.
