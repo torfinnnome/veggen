@@ -27,6 +27,7 @@ if MODE not in ("ssh", "local"):
     raise SystemExit(f"Invalid VEGGEN_MODE={MODE!r}; expected 'ssh' or 'local'")
 PASSWORD = os.environ.get("VEGGEN_PASSWORD", "") # Must be set via VEGGEN_PASSWORD env var
 DHCP_PREFIX = "veggen-" # Prefix for devices to manage
+PORT = int(os.environ.get("VEGGEN_PORT", "5000")) # Port for the web interface
 
 # Simple in-memory rate limiter for login (failsafe against brute-force)
 _failed_logins = {}  # ip -> list of timestamps
@@ -395,4 +396,4 @@ def set_security_headers(response):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=PORT)

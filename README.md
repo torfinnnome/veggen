@@ -61,6 +61,7 @@ uci commit dhcp
     export VEGGEN_MODE=ssh               # optional: "ssh" (default) or "local"
     export VEGGEN_ROUTER_IP=192.168.0.1  # optional, ssh mode only (default shown)
     export VEGGEN_SSH_USER=veggen        # optional, ssh mode only (default shown)
+    export VEGGEN_PORT=5000               # optional (default shown)
     ```
     Without `VEGGEN_PASSWORD` the login page shows "Server misconfigured".
 
