@@ -387,11 +387,16 @@ def api_interfaces():
 
 @app.after_request
 def set_security_headers(response):
-    """Add security headers to every response."""
+    """Add security and cache headers to every response.
+
+    no-store: the API reflects live router state, so a browser-served cache
+    would make the Reload button (and period/tab switches) show stale data.
+    """
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
