@@ -1253,20 +1253,29 @@ cell.setAttribute('colspan', '5');
             }
         }
 
+        var _reloading = false;
         async function reloadAll() {
-            var query = document.getElementById('search-input').value;
-            _detailCache = {};
-            if (_currentChart) { _currentChart.destroy(); _currentChart = null; }
-            document.querySelectorAll('.detail-row').forEach(function(det) {
-                det.style.display = 'none';
-                det.setAttribute('data-expanded', 'false');
-            });
-            await fetchDevices();
-            await fetchAllHosts();
-            await fetchInterfaces();
-            await fetchBatchTraffic();
-            document.getElementById('search-input').value = query;
-            filterDevices();
+            if (_reloading) return;
+            _reloading = true;
+            try {
+                var query = document.getElementById('search-input').value;
+                _detailCache = {};
+                Object.keys(_charts).forEach(function (mac) {
+                    if (_charts[mac]) { _charts[mac].destroy(); delete _charts[mac]; }
+                });
+                document.querySelectorAll('.detail-row').forEach(function(det) {
+                    det.style.display = 'none';
+                    det.setAttribute('data-expanded', 'false');
+                });
+                await fetchDevices();
+                await fetchAllHosts();
+                await fetchInterfaces();
+                await fetchBatchTraffic();
+                document.getElementById('search-input').value = query;
+                filterDevices();
+            } finally {
+                _reloading = false;
+            }
         }
 
         updateThemeButton();
