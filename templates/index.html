@@ -305,13 +305,14 @@
                     <thead>
                         <tr>
                             <th class="sortable-header" onclick="sortInterfacesCol(0)">Name</th>
-                            <th class="sortable-header" style="width: 160px;" onclick="sortInterfacesCol(1)">MAC</th>
-                            <th class="sortable-header" style="width: 130px;" onclick="sortInterfacesCol(2)">Traffic ↓</th>
-                            <th class="sortable-header" style="width: 130px;" onclick="sortInterfacesCol(3)">Traffic ↑</th>
+                            <th class="sortable-header" style="width: 140px;" onclick="sortInterfacesCol(1)">IP</th>
+                            <th class="sortable-header" style="width: 160px;" onclick="sortInterfacesCol(2)">MAC</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortInterfacesCol(3)">Traffic ↓</th>
+                            <th class="sortable-header" style="width: 130px;" onclick="sortInterfacesCol(4)">Traffic ↑</th>
                         </tr>
                     </thead>
                     <tbody id="interfaces-tbody">
-                        <tr><td colspan="4">Loading...</td></tr>
+                        <tr><td colspan="5">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -944,7 +945,7 @@ cell.setAttribute('colspan', '5');
             if (_interfaces.length === 0) {
                 var row = document.createElement('tr');
                 var cell = document.createElement('td');
-                cell.setAttribute('colspan', '4');
+                cell.setAttribute('colspan', '5');
                 cell.textContent = 'No interfaces found.';
                 row.appendChild(cell);
                 tbody.appendChild(row);
@@ -958,6 +959,9 @@ cell.setAttribute('colspan', '5');
                 nameTd.setAttribute('data-mac', iface.mac);
                 nameTd.textContent = (iface.name && iface.name !== iface.iface) ? iface.name + ' (' + iface.iface + ')' : iface.iface;
                 tr.appendChild(nameTd);
+                var ipTd = document.createElement('td');
+                ipTd.textContent = iface.ip || '';
+                tr.appendChild(ipTd);
                 var macTd = document.createElement('td');
                 macTd.textContent = iface.mac;
                 tr.appendChild(macTd);
@@ -983,7 +987,7 @@ cell.setAttribute('colspan', '5');
                 _interfacesSort.dir = _interfacesSort.dir === 'asc' ? 'desc' : 'asc';
             } else {
                 _interfacesSort.col = col;
-                _interfacesSort.dir = col >= 2 ? 'desc' : 'asc';
+                _interfacesSort.dir = col >= 3 ? 'desc' : 'asc';
             }
             sortInterfaces();
         }
@@ -1007,13 +1011,18 @@ cell.setAttribute('colspan', '5');
             rows.sort(function(a, b) {
                 var va = a.children[col] ? a.children[col].textContent : '';
                 var vb = b.children[col] ? b.children[col].textContent : '';
-                if (col >= 2) {
+                if (col >= 3) {
                     // Traffic columns: sort by numeric value via the batch map.
                     var ma = a.querySelector('.device-name').getAttribute('data-mac').toLowerCase();
                     var mb = b.querySelector('.device-name').getAttribute('data-mac').toLowerCase();
                     va = (_batchTraffic[ma] && _batchTraffic[ma].down) || 0;
                     vb = (_batchTraffic[mb] && _batchTraffic[mb].down) || 0;
-                    if (col === 3) { va = (_batchTraffic[ma] && _batchTraffic[ma].up) || 0; vb = (_batchTraffic[mb] && _batchTraffic[mb].up) || 0; }
+                    if (col === 4) { va = (_batchTraffic[ma] && _batchTraffic[ma].up) || 0; vb = (_batchTraffic[mb] && _batchTraffic[mb].up) || 0; }
+                }
+                if (col === 1) {
+                    // IP column: natural compare so .10 sorts after .2.
+                    var cmp = _naturalCompare(va, vb);
+                    return cmp === 0 ? 0 : cmp * dir;
                 }
                 if (va < vb) return -1 * dir;
                 if (va > vb) return 1 * dir;
@@ -1025,7 +1034,7 @@ cell.setAttribute('colspan', '5');
                 if (details[mac]) tbody.appendChild(details[mac]);
             });
             var headers = tbody.parentNode.querySelectorAll('.sortable-header');
-            var baseLabels = ['Name', 'MAC', 'Traffic \u2193', 'Traffic \u2191'];
+            var baseLabels = ['Name', 'IP', 'MAC', 'Traffic \u2193', 'Traffic \u2191'];
             headers.forEach(function(th, i) {
                 th.textContent = baseLabels[i] || th.textContent;
                 if (_interfacesSort.col === i) th.classList.add('active-sort');

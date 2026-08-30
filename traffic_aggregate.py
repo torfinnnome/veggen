@@ -325,20 +325,36 @@ def _iface_names():
         return {}
 
 
+def _iface_ips():
+    """Map device name -> list of IPv4 addresses.
+
+    Reads /etc/veggen/iface_ips.json, written by the same root-run snapshot
+    cron as iface_names.json. Returns {} if the file is missing or
+    unreadable (the IP column renders empty).
+    """
+    try:
+        with open("/etc/veggen/iface_ips.json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
 def cmd_interfaces():
     """List all network interfaces with their synthetic MACs and friendly names.
 
     Reads the iface_mac mapping table written by parse_nlbwmon.py. Resolves
-    logical names (wan/lan/guest/etc.) from /etc/veggen/iface_names.json,
-    dumped by the root-run snapshot cron. Returns [{iface, mac, name}]
-    sorted by interface name. 'name' is the friendly label when mapped,
-    else the raw iface.
+    logical names (wan/lan/guest/etc.) and IPv4 addresses from
+    /etc/veggen/iface_names.json and /etc/veggen/iface_ips.json, dumped by
+    the root-run snapshot cron. Returns [{iface, mac, name, ip}] sorted by
+    interface name. 'name' is the friendly label when mapped, else the raw
+    iface. 'ip' is the IPv4 address(es) joined with ", ", or "" when unknown.
     """
     db = sqlite3.connect(DB)
     db.row_factory = sqlite3.Row
     rows = db.execute("SELECT iface, mac FROM iface_mac ORDER BY iface").fetchall()
     db.close()
     dev_names = _iface_names()
+    dev_ips = _iface_ips()
     result = []
     for r in rows:
         iface = r["iface"]
@@ -346,6 +362,7 @@ def cmd_interfaces():
             "iface": iface,
             "mac": r["mac"],
             "name": dev_names.get(iface, iface),
+            "ip": ", ".join(dev_ips.get(iface, [])),
         })
     return result
 

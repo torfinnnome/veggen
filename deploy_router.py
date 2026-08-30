@@ -134,23 +134,31 @@ TS=$(date +%s)
 mkdir -p /etc/veggen
 python3 /usr/share/veggen/parse_nlbwmon.py "$TS"
 
-# Dump logical interface names (wan/lan/etc.) from ubus netifd to a
-# world-readable file. traffic_aggregate.py reads this as the veggen
-# user, who can't reach ubus or /etc/config/network directly.
+# Dump logical interface names (wan/lan/etc.) and their IPv4 addresses
+# from ubus netifd to world-readable files. traffic_aggregate.py reads
+# these as the veggen user, who can't reach ubus or /etc/config/network
+# directly.
 ubus call network.interface dump 2>/dev/null | python3 -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
-    mapping = {}
+    names = {}
+    ips = {}
     for e in data.get("interface", []):
         if not e.get("up"): continue
         dev = e.get("l3_device") or e.get("device")
-        if dev: mapping[dev] = e.get("interface") or dev
+        if not dev: continue
+        names[dev] = e.get("interface") or dev
+        addrs = [a["address"] for a in e.get("ipv4-address", [])
+                 if a.get("address")]
+        if addrs: ips[dev] = addrs
     with open("/etc/veggen/iface_names.json", "w") as f:
-        json.dump(mapping, f)
+        json.dump(names, f)
+    with open("/etc/veggen/iface_ips.json", "w") as f:
+        json.dump(ips, f)
 except Exception:
     pass
-' && chmod 0644 /etc/veggen/iface_names.json 2>/dev/null
+' && chmod 0644 /etc/veggen/iface_names.json /etc/veggen/iface_ips.json 2>/dev/null
 
 # Two-tier retention, run once per day:
 #   1. Roll up the previous day's raw 5-min snapshots into per-MAC daily

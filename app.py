@@ -365,12 +365,13 @@ def traffic_batch_history():
 @app.route("/api/interfaces")
 @login_required
 def api_interfaces():
-    """Returns the list of network interfaces with synthetic MACs and names.
+    """Returns the list of network interfaces with synthetic MACs, names, and IPs.
 
     The mapping is written by parse_nlbwmon.py (one row per interface, from
-    /sys/class/net/*). Logical names (WAN/LAN/etc.) are resolved from ubus
-    netifd by traffic_aggregate.py. The frontend uses the MAC to fetch
-    per-interface traffic via the existing /api/traffic/history endpoint.
+    /sys/class/net/*). Logical names (WAN/LAN/etc.) and IPv4 addresses are
+    resolved from ubus netifd dumps by traffic_aggregate.py. The frontend
+    uses the MAC to fetch per-interface traffic via the existing
+    /api/traffic/history endpoint.
     """
     raw = run_router_command(
         "python3 /usr/share/veggen/traffic_aggregate.py interfaces"

@@ -7,7 +7,7 @@ A simple web application to manage internet access for selected devices on an Op
 - Displays real-time internet access status (Online/Blocked).
 - Per-device toggles plus a per-kid bulk switch to block or unblock internet access using MAC-based firewall rules.
 - **All Hosts** view: every host on the network (static DHCP entries and dynamic leases) with traffic columns.
-- **Interfaces** view: per-interface traffic (WAN/LAN, etc.).
+- **Interfaces** view: per-interface traffic (WAN/LAN, etc.), with IP addresses.
 - **Optional traffic accounting**: per-device bandwidth usage with historical diverging bar charts (download/upload over time) for day/week/month/year periods, period navigation, drag-to-zoom, live search, and dark mode.
 - No database required for the core app; uses the router's UCI configuration as the source of truth (traffic accounting keeps a small SQLite database on the router).
 
@@ -120,7 +120,7 @@ The app must run as the `veggen` user from the Setup Router section: all router 
 Three tabs:
 - **Managed**: `veggen-` devices grouped by kid (`veggen-<kid>-<device>`). Toggle a single device or the whole group with the kid-level switch.
 - **All Hosts**: every host on the network (static DHCP hosts plus dynamic leases from `/tmp/dhcp.leases`, deduplicated by MAC).
-- **Interfaces**: per-interface traffic (WAN/LAN, ...), using synthetic MACs that map back to the logical interface name.
+- **Interfaces**: per-interface traffic (WAN/LAN, ...), with IP addresses, using synthetic MACs that map back to the logical interface name.
 
 Controls:
 - **Period selector** (Day/Week/Month/Year) sets the window for the traffic columns; "Day" means since local midnight.
@@ -148,7 +148,7 @@ This does the following (idempotent — safe to rerun):
 - Configures nlbwmon to monitor the LAN subnet
 - Deploys `parse_nlbwmon.py` (nlbwmon counters plus cumulative byte counters for every network interface) and the `traffic-snapshot.sh` cron entrypoint to `/usr/share/veggen/`
 - Deploys `traffic_aggregate.py` aggregation helper to `/usr/share/veggen/`
-- The snapshot script also dumps logical interface names (WAN/LAN, ...) from ubus netifd to `/etc/veggen/iface_names.json` for the Interfaces view
+- The snapshot script also dumps logical interface names (WAN/LAN, ...) and their IPv4 addresses from ubus netifd to `/etc/veggen/iface_names.json` and `/etc/veggen/iface_ips.json` for the Interfaces view
 - Creates `/etc/veggen/traffic.db` SQLite database
 - Adds cron job (every 5 minutes) to `/etc/crontabs/root`
 - Removes the obsolete nft meter table and `firewall.user` hook
