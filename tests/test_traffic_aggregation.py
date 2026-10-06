@@ -262,6 +262,8 @@ class WindowedRenderTests(unittest.TestCase):
     the browser's local time so "today" spans 00:00 to now. The renderer must
     cover the entire window — not just first-activity to last-activity — so a
     partial day renders from midnight, and an empty day renders a flat line.
+    The grid covers every bucket intersecting the window, including a trailing
+    partial bucket when end is not bucket-aligned.
     """
 
     BUCKET = 900  # 15 minutes (day period)
@@ -341,6 +343,346 @@ class WindowedRenderTests(unittest.TestCase):
         self.assertEqual(len(filled), 2)
         self.assertEqual(filled[0]["ts"], 3600)
         self.assertEqual(filled[1]["ts"], 7200)
+
+    def test_unaligned_end_keeps_trailing_partial_bucket(self):
+        # Window [0, 54900): the bucket at 54000 intersects the window for
+        # 900s and MUST be rendered (its traffic would otherwise vanish).
+        agg = [{"ts": 54000, "up": 100, "down": 500}]
+        filled = _render_buckets(agg, self.BUCKET, start=0, end=54900)
+        self.assertEqual(len(filled), 61)  # ceil(54900/900)
+        self.assertEqual(filled[-1]["ts"], 54000)
+        self.assertEqual(filled[-1]["down"], 500)
+
+    def test_origin_shifts_the_zero_fill_grid(self):
+        # With origin=7200 the grid starts at 7200, not at the UTC-aligned 0.
+        filled = _render_buckets([], self.BUCKET, start=7200, end=7200 + 86400,
+                                 origin=7200)
+        self.assertEqual(len(filled), 86400 // self.BUCKET)
+        self.assertEqual(filled[0]["ts"], 7200)
+        self.assertEqual(filled[-1]["ts"], 7200 + 86400 - self.BUCKET)
+
+
+class OriginAlignedRawTests(unittest.TestCase):
+    """Raw (day/week) windows start at the browser's local midnight, which is
+    not UTC-aligned when the router's clock is UTC. Buckets must align to the
+    window start: UTC-aligned buckets label bars at the wrong local time and
+    push the hours before UTC midnight into the previous day's bar (week) or
+    drop them outside the window entirely (day).
+    """
+
+    MAC = "aa:bb:cc:dd:ee:01"
+    RATE_DOWN = 1_000_000  # bytes/s
+
+    def _build_db(self, start, end, snap=300):
+        import os as _os
+        import sqlite3
+        path = _os.environ.get("VEGGEN_DB", "/tmp/test_origin_aligned.db")
+        db = sqlite3.connect(path)
+        db.execute("DROP TABLE IF EXISTS mac_traffic")
+        db.execute("DROP TABLE IF EXISTS mac_traffic_daily")
+        db.execute(
+            "CREATE TABLE mac_traffic (ts INTEGER, mac TEXT, bytes_in INTEGER, "
+            "bytes_out INTEGER, PRIMARY KEY (ts, mac))"
+        )
+        db.execute(
+            "CREATE TABLE mac_traffic_daily (day INTEGER, mac TEXT, bytes_in INTEGER, "
+            "bytes_out INTEGER, PRIMARY KEY (day, mac))"
+        )
+        ts = start
+        inn = 0
+        while ts <= end:
+            db.execute("INSERT OR REPLACE INTO mac_traffic VALUES (?,?,?,?)",
+                       (ts, self.MAC, inn, 0))
+            ts += snap
+            inn += self.RATE_DOWN * snap
+        db.commit()
+        db.close()
+        return path
+
+    def _run(self, path, period, start, end):
+        import traffic_aggregate
+        old_db = traffic_aggregate.DB
+        traffic_aggregate.DB = path
+        try:
+            return _cmd_history(self.MAC, period, start, end)
+        finally:
+            traffic_aggregate.DB = old_db
+
+    def test_week_window_unaligned_to_utc_gets_origin_aligned_day_buckets(self):
+        # 7-day window starting 02:00 UTC (local midnight at UTC+2).
+        start = 7 * 86400 + 7200
+        end = start + 7 * 86400
+        path = self._build_db(start, end)
+        out = self._run(path, "week", start, end)
+        buckets = out["buckets"]
+        # Exactly 7 day-bars, each aligned to the window start — not 8.
+        self.assertEqual(len(buckets), 7)
+        self.assertEqual(buckets[0]["ts"], start)
+        for i, b in enumerate(buckets):
+            self.assertEqual(b["ts"], start + i * 86400)
+        # No traffic is lost off the edges: bars sum to the reported total.
+        self.assertEqual(sum(b["down"] for b in buckets), out["total_down"])
+        self.assertGreater(out["total_down"], 6 * 86400 * self.RATE_DOWN)
+
+    def test_day_window_before_utc_midnight_stays_in_window(self):
+        # Window [02:00, +24h): snapshots just before the next UTC midnight
+        # (ts=84600) must land in a bucket inside the window, not in the
+        # UTC-aligned 86400 bucket that lies past the window end.
+        start, end = 7200, 7200 + 86400
+        path = self._build_db(start, end)
+        out = self._run(path, "day", start, end)
+        buckets = out["buckets"]
+        self.assertEqual(buckets[0]["ts"], start)
+        self.assertEqual(len(buckets), 86400 // 900)
+        near_utc_midnight = [b for b in buckets if b["ts"] == 84600]
+        self.assertEqual(len(near_utc_midnight), 1)
+        self.assertGreater(near_utc_midnight[0]["down"], 0)
+        self.assertEqual(sum(b["down"] for b in buckets), out["total_down"])
+
+    def test_day_view_first_bucket_is_window_start(self):
+        start = 7 * 86400 + 7200
+        end = start + 86400
+        path = self._build_db(start, end)
+        out = self._run(path, "day", start, end)
+        self.assertEqual(out["buckets"][0]["ts"], start)
+        self.assertEqual(len(out["buckets"]), 86400 // 900)
+
+
+class AppApiErrorTests(unittest.TestCase):
+    """Router/SSH failures MUST surface as 502 + error JSON, not as empty
+    data: silently returning [] / {} made broken routers look like idle
+    networks (the bug this class locks down)."""
+
+    def setUp(self):
+        import app as app_module
+        self.mod = app_module
+        self.client = app_module.app.test_client()
+        with self.client.session_transaction() as sess:
+            sess["logged_in"] = True
+        self._orig = app_module.run_router_command
+
+    def tearDown(self):
+        self.mod.run_router_command = self._orig
+
+    def _stub(self, ok, stdout=""):
+        self.mod.run_router_command = lambda *p: self.mod.RouterResult(ok, stdout)
+
+    def test_history_router_failure_is_502(self):
+        self._stub(False)
+        r = self.client.get("/api/traffic/history?mac=aa:bb:cc:dd:ee:01"
+                            "&period=day&start=0&end=86400")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("error", r.get_json())
+
+    def test_history_invalid_json_is_502(self):
+        self._stub(True, "not json")
+        r = self.client.get("/api/traffic/history?mac=aa:bb:cc:dd:ee:01"
+                            "&period=day&start=0&end=86400")
+        self.assertEqual(r.status_code, 502)
+
+    def test_history_success_passes_payload_through(self):
+        payload = {"period": "day", "mac": "aa:bb:cc:dd:ee:01", "total_up": 1,
+                   "total_down": 2, "avg_up_per_day": 1, "avg_down_per_day": 2,
+                   "buckets": [{"ts": 0, "up": 1, "down": 2}]}
+        import json as _json
+        self._stub(True, _json.dumps(payload))
+        r = self.client.get("/api/traffic/history?mac=aa:bb:cc:dd:ee:01"
+                            "&period=day&start=0&end=86400")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), payload)
+
+    def test_batch_router_failure_is_502(self):
+        self._stub(False)
+        r = self.client.get("/api/traffic/batch-history?period=day&start=0&end=86400")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("error", r.get_json())
+
+    def test_interfaces_router_failure_is_502(self):
+        self._stub(False)
+        r = self.client.get("/api/interfaces")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("error", r.get_json())
+
+    def test_toggle_router_failure_is_502(self):
+        self._stub(False)
+        r = self.client.post("/api/toggle", json={"mac": "aa:bb:cc:dd:ee:01",
+                                                  "action": "block"})
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("error", r.get_json())
+
+    def test_toggle_success_is_200(self):
+        self._stub(True)
+        r = self.client.post("/api/toggle", json={"mac": "aa:bb:cc:dd:ee:01",
+                                                  "action": "block"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["success"])
+
+    def test_devices_router_failure_is_502(self):
+        self._stub(False)
+        r = self.client.get("/api/devices")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("error", r.get_json())
+
+    def test_all_hosts_router_failure_is_502(self):
+        self._stub(False)
+        r = self.client.get("/api/all-hosts")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("error", r.get_json())
+
+    def test_all_hosts_missing_lease_file_is_200(self):
+        # A missing /tmp/dhcp.leases is legitimate (no leases yet): the
+        # command tolerates it with `|| true`, so static hosts still render.
+        def fake(*parts):
+            cmd = parts[0] if len(parts) == 1 else " ".join(parts)
+            if "uci show dhcp" in cmd:
+                return self.mod.RouterResult(
+                    True, "dhcp.@host[0].name='veggen-k1-pc'\n"
+                          "dhcp.@host[0].mac='aa:bb:cc:dd:ee:01'\n"
+                          "dhcp.@host[0].ip='192.168.0.50'\n")
+            if "dhcp.leases" in cmd:
+                return self.mod.RouterResult(True, "")
+            return self.mod.RouterResult(True, "online\n")
+        self.mod.run_router_command = fake
+        r = self.client.get("/api/all-hosts")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.get_json()), 1)
+
+class BlockIdempotencyTests(unittest.TestCase):
+    """The generated block shell fragment must be idempotent: repeated block
+    clicks used to append a duplicate uci rule (and duplicate nft rules) on
+    every click. These tests execute the actual generated command against a
+    fake uci/nft to prove the guard works."""
+
+    MAC = "aa:bb:cc:dd:ee:01"
+
+    SUDO = "#!/bin/sh\nexec \"$@\"\n"
+
+    UCI = r'''#!/usr/bin/env python3
+import json, os, re, sys
+path = os.environ["FAKE_UCI_STATE"]
+def load():
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {"rules": []}
+def save(d):
+    with open(path, "w") as f:
+        json.dump(d, f)
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+cmd = args[0] if args else ""
+d = load()
+if cmd == "show":
+    for i, r in enumerate(d["rules"]):
+        for k, v in r.items():
+            print(f"firewall.@rule[{i}].{k}='{v}'")
+elif cmd == "add":
+    d["rules"].append({})
+    save(d)
+    print(f"rule{len(d['rules'])}")
+elif cmd == "set":
+    m = re.fullmatch(r"firewall\.@rule\[(-?\d+)\]\.(\w+)=(.*)", args[1])
+    if not m:
+        sys.exit(2)
+    i = int(m.group(1)) % len(d["rules"])
+    d["rules"][i][m.group(2)] = m.group(3)
+    save(d)
+elif cmd == "delete":
+    m = re.fullmatch(r"firewall\.@rule\[(\d+)\]", args[1])
+    if not m:
+        sys.exit(2)
+    del d["rules"][int(m.group(1))]
+    save(d)
+elif cmd == "commit":
+    pass
+else:
+    sys.exit(2)
+'''
+
+    NFT = r'''#!/usr/bin/env python3
+import os, sys
+log = os.environ["FAKE_NFT_LOG"]
+args = sys.argv[1:]
+if args[:1] == ["insert"]:
+    with open(log, "a") as f:
+        f.write(" ".join(args) + "\n")
+elif args[:1] == ["delete"]:
+    with open(log, "a") as f:
+        f.write(" ".join(args) + "\n")
+elif args[:2] == ["list", "chain"]:
+    chain = args[4] if len(args) > 4 else ""
+    if os.path.exists(log):
+        with open(log) as f:
+            lines = [l for l in f.read().splitlines()
+                     if l.startswith("insert") and f" inet fw4 {chain} " in l]
+        for h, l in enumerate(lines):
+            print(f"{l} handle {h}")
+'''
+
+    def setUp(self):
+        import os as _os
+        import shutil
+        import stat
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.state = _os.path.join(self.dir, "uci.json")
+        self.nft_log = _os.path.join(self.dir, "nft.log")
+        for name, body in (("sudo", self.SUDO), ("uci", self.UCI), ("nft", self.NFT)):
+            p = _os.path.join(self.dir, name)
+            with open(p, "w") as f:
+                f.write(body)
+            _os.chmod(p, _os.stat(p).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        self.env = dict(_os.environ)
+        self.env["PATH"] = self.dir + _os.pathsep + self.env["PATH"]
+        self.env["FAKE_UCI_STATE"] = self.state
+        self.env["FAKE_NFT_LOG"] = self.nft_log
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _sh(self, cmd):
+        import subprocess
+        return subprocess.run(["sh", "-c", cmd], env=self.env,
+                              capture_output=True, text=True)
+
+    def _rules(self):
+        import json
+        if not os.path.exists(self.state):
+            return []
+        with open(self.state) as f:
+            return json.load(f)["rules"]
+
+    def test_repeated_block_creates_exactly_one_rule(self):
+        import app as app_module
+        cmd = app_module._block_command(self.MAC)
+        for _ in range(3):
+            r = self._sh(cmd)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        rules = self._rules()
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["name"], f"block_{self.MAC.replace(':', '')}")
+        self.assertEqual(rules[0]["src_mac"], self.MAC)
+        self.assertEqual(rules[0]["target"], "DROP")
+        with open(self.nft_log) as f:
+            inserts = [l for l in f.read().splitlines() if l.startswith("insert")]
+        self.assertEqual(len(inserts), 2)  # forward + input, once
+
+    def test_unblock_removes_the_rule(self):
+        import app as app_module
+        self.assertEqual(self._sh(app_module._block_command(self.MAC)).returncode, 0)
+        self.assertEqual(self._sh(app_module._unblock_command(self.MAC)).returncode, 0)
+        self.assertEqual(self._rules(), [])
+        with open(self.nft_log) as f:
+            deletes = [l for l in f.read().splitlines() if l.startswith("delete")]
+        self.assertEqual(len(deletes), 2)
+
+    def test_block_then_unblock_then_block_leaves_one_rule(self):
+        import app as app_module
+        for cmd in (app_module._block_command(self.MAC),
+                    app_module._unblock_command(self.MAC),
+                    app_module._block_command(self.MAC)):
+            self.assertEqual(self._sh(cmd).returncode, 0)
+        self.assertEqual(len(self._rules()), 1)
 
 class LiveTodayMergeTests(unittest.TestCase):
     """Month/year views read the daily rollup, which only holds complete

@@ -240,6 +240,18 @@
             color: var(--pico-primary);
             border-color: var(--pico-primary);
         }
+        .api-error {
+            display: none;
+            margin: 0.5rem 0;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--pico-color-red-600);
+            border-radius: 4px;
+            color: var(--pico-color-red-600);
+            font-size: 0.85rem;
+        }
+        .api-error.visible {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -251,6 +263,7 @@
         </ul>
     </nav>
     <main class="container">
+        <div id="api-error" class="api-error" role="alert"></div>
         <section id="device-list" aria-busy="true">
             <select id="period-select" class="period-select" onchange="onPeriodChange()">
                 <option value="day">Day</option>
@@ -446,14 +459,45 @@
             return row;
         }
 
+        function _apiError(message) {
+            var el = document.getElementById('api-error');
+            if (!el) return;
+            el.textContent = message;
+            el.classList.add('visible');
+        }
+
+        function _clearApiError() {
+            var el = document.getElementById('api-error');
+            if (!el) return;
+            el.textContent = '';
+            el.classList.remove('visible');
+        }
+
+        // A non-2xx response carries {"error": "..."} from the app; surface it
+        // instead of rendering an empty chart/table as if there were no data.
+        async function _errorFromResponse(res) {
+            try {
+                var body = await res.json();
+                return body.error || ('Request failed (' + res.status + ')');
+            } catch (e) {
+                return 'Request failed (' + res.status + ')';
+            }
+        }
+
         async function _fetchHistory(mac, period, start, end) {
             try {
                 var res = await fetch('/api/traffic/history?mac=' + mac + '&period=' + period + '&start=' + start + '&end=' + end);
+                if (!res.ok) {
+                    _apiError('Traffic history unavailable: ' + await _errorFromResponse(res));
+                    return null;
+                }
+                _clearApiError();
                 var data = await res.json();
                 _detailCache[mac] = data;
                 return data;
             } catch (e) {
                 console.error('Error fetching history:', e);
+                _apiError('Traffic history unavailable: ' + e);
                 return null;
             }
         }
@@ -776,11 +820,17 @@
             var w = _periodWindow(_currentPeriod, 0);
             try {
                 var res = await fetch('/api/traffic/batch-history?period=' + _currentPeriod + '&start=' + w.start + '&end=' + w.end);
+                if (!res.ok) {
+                    _apiError('Traffic totals unavailable: ' + await _errorFromResponse(res));
+                    return;
+                }
+                _clearApiError();
                 var data = await res.json();
                 _batchTraffic = data.macs || {};
                 updateTrafficCells();
             } catch (e) {
                 console.error('Error fetching batch traffic:', e);
+                _apiError('Traffic totals unavailable: ' + e);
             }
         }
 
@@ -877,6 +927,11 @@
         async function fetchAllHosts() {
             try {
                 var res = await fetch('/api/all-hosts');
+                if (!res.ok) {
+                    _apiError('Host list unavailable: ' + await _errorFromResponse(res));
+                    return;
+                }
+                _clearApiError();
                 var hosts = await res.json();
                 var tbody = document.getElementById('allhosts-tbody');
                 tbody.innerHTML = '';
@@ -930,12 +985,18 @@ cell.setAttribute('colspan', '5');
         async function fetchInterfaces() {
             try {
                 var res = await fetch('/api/interfaces');
+                if (!res.ok) {
+                    _apiError('Interfaces unavailable: ' + await _errorFromResponse(res));
+                    return;
+                }
+                _clearApiError();
                 _interfaces = await res.json();
                 renderInterfaces();
                 // Traffic columns: reuse the batch fetch already loaded for all-hosts.
                 updateTrafficCells();
             } catch (e) {
                 console.error('Error fetching interfaces:', e);
+                _apiError('Interfaces unavailable: ' + e);
             }
         }
 
@@ -1049,6 +1110,11 @@ cell.setAttribute('colspan', '5');
             
             try {
                 const response = await fetch('/api/devices');
+                if (!response.ok) {
+                    _apiError('Device list unavailable: ' + await _errorFromResponse(response));
+                    return;
+                }
+                _clearApiError();
                 const devices = await response.json();
                 const tbody = document.getElementById('devices-tbody');
                 tbody.innerHTML = '';
@@ -1177,7 +1243,7 @@ cell.setAttribute('colspan', '5');
                     body: JSON.stringify({ mac, action })
                 });
                 if (response.ok) await fetchDevices();
-                else alert('Failed to update status.');
+                else alert('Failed to update status: ' + await _errorFromResponse(response));
             } catch (e) { console.error(e); }
         }
 
@@ -1185,6 +1251,7 @@ cell.setAttribute('colspan', '5');
             const action = shouldBlock ? 'block' : 'unblock';
             try {
                 const res = await fetch('/api/devices');
+                if (!res.ok) { alert('Failed to update group: ' + await _errorFromResponse(res)); return; }
                 const devices = await res.json();
                 const macs = devices.filter(d => d.kid === kid).map(d => d.mac);
                 if (macs.length === 0) return;
@@ -1195,7 +1262,7 @@ cell.setAttribute('colspan', '5');
                     body: JSON.stringify({ macs, action })
                 });
                 if (response.ok) await fetchDevices();
-                else alert('Failed to update group.');
+                else alert('Failed to update group: ' + await _errorFromResponse(response));
             } catch (e) { console.error(e); }
         }
 

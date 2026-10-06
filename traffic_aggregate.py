@@ -9,9 +9,9 @@ Usage:
     python3 traffic_aggregate.py history --mac aa:bb:cc:dd:ee:ff --period day
     python3 traffic_aggregate.py batch --period week
 
-Output is a single JSON object on stdout. Mirrors the aggregation logic in
-app.py (_aggregate_history_rows / _aggregate_batch_rows) so results are
-identical regardless of where they run.
+Output is a single JSON object on stdout. The aggregation semantics live only
+here: app.py ships this file to the router and renders whatever it prints, so
+results are identical regardless of where they run.
 """
 
 import argparse
@@ -25,11 +25,24 @@ DB = os.environ.get("VEGGEN_DB", "/etc/veggen/traffic.db")
 
 BUCKET_SECONDS = {"day": 900, "week": 86400, "month": 86400, "year": 604800}
 
-def aggregate_history_rows(rows, bucket_size, cutoff):
+def _bucket_floor(ts, bucket_size, origin):
+    """Bucket key for ts, aligned to origin (UTC-aligned when origin is None)."""
+    if origin is None:
+        return (ts // bucket_size) * bucket_size
+    return origin + ((ts - origin) // bucket_size) * bucket_size
+
+
+def aggregate_history_rows(rows, bucket_size, cutoff, origin=None):
     """Per-bucket traffic totals via consecutive-delta sums.
 
     rows: iterable of (ts, bytes_out, bytes_in) ordered by ts ascending.
-    Returns (buckets, total_up, total_down). See app.py for semantics.
+    Returns (buckets, total_up, total_down).
+
+    Bucket boundaries are UTC-aligned unless origin is given, in which case
+    they are aligned to origin. The frontend sends local-midnight windows, so
+    raw (day/week) paths pass origin=start: UTC-aligned day buckets would
+    label bars at the wrong local time and push the hours before UTC midnight
+    into the previous day's bar.
     """
     bucket_up = {}
     bucket_down = {}
@@ -46,7 +59,7 @@ def aggregate_history_rows(rows, bucket_size, cutoff):
                 d_out = 0
             if d_in < 0:
                 d_in = 0
-            b = (prev_ts // bucket_size) * bucket_size
+            b = _bucket_floor(prev_ts, bucket_size, origin)
             bucket_up[b] = bucket_up.get(b, 0) + d_out
             bucket_down[b] = bucket_down.get(b, 0) + d_in
             total_up += d_out
@@ -162,12 +175,16 @@ def aggregate_daily_rows(rows, bucket_size):
     return buckets, total_up, total_down
 
 
-def _render_buckets(agg, bucket_size, start=None, end=None):
+def _render_buckets(agg, bucket_size, start=None, end=None, origin=None):
     """Convert aggregated buckets to chart form with mbps + zero-filling.
 
     When start/end are given (epoch seconds, [start, end)), zero-fill across
     the full window so a partial day (today, offset 0) spans 00:00 to now on
-    the x-axis rather than only first-activity to last-activity.
+    the x-axis rather than only first-activity to last-activity. The grid
+    covers every bucket intersecting [start, end), so a window whose end is
+    not bucket-aligned still gets its trailing partial bucket. origin sets
+    the alignment (UTC-aligned when None) and must match the keys produced
+    by aggregate_history_rows.
     """
     if not agg and start is None:
         return []
@@ -176,8 +193,8 @@ def _render_buckets(agg, bucket_size, start=None, end=None):
         # today still renders a flat line instead of an early-return blank.
         if end is None or end <= start:
             return []
-        ts = (start // bucket_size) * bucket_size
-        end_bucket = (end // bucket_size) * bucket_size
+        ts = _bucket_floor(start, bucket_size, origin)
+        end_bucket = _bucket_floor(end - 1, bucket_size, origin) + bucket_size
         filled = []
         while ts < end_bucket:
             filled.append({"ts": ts, "up": 0, "down": 0, "up_mbps": 0, "down_mbps": 0})
@@ -191,8 +208,8 @@ def _render_buckets(agg, bucket_size, start=None, end=None):
                         "up_mbps": up_mbps, "down_mbps": down_mbps})
     bucket_map = {b["ts"]: b for b in buckets}
     if start is not None and end is not None:
-        first_ts = (start // bucket_size) * bucket_size
-        end_bucket = (end // bucket_size) * bucket_size
+        first_ts = _bucket_floor(start, bucket_size, origin)
+        end_bucket = _bucket_floor(end - 1, bucket_size, origin) + bucket_size
     else:
         first_ts = buckets[0]["ts"]
         end_bucket = buckets[-1]["ts"] + bucket_size
@@ -225,7 +242,7 @@ def cmd_history(mac, period, start, end):
             (mac, start, end),
         )
         raw = [(r["ts"], r["bytes_out"], r["bytes_in"]) for r in rows]
-        agg, total_up, total_down = aggregate_history_rows(raw, bucket_size, start)
+        agg, total_up, total_down = aggregate_history_rows(raw, bucket_size, start, origin=start)
     else:
         now = int(time.time())
         today_mid = now - (now % 86400)
@@ -251,7 +268,8 @@ def cmd_history(mac, period, start, end):
             total_up += t_up
             total_down += t_down
 
-    buckets = _render_buckets(agg, bucket_size, start, end)
+    origin = start if period in RAW_PERIODS else None
+    buckets = _render_buckets(agg, bucket_size, start, end, origin=origin)
     if not buckets:
         return {"period": period, "mac": mac, "total_up": 0, "total_down": 0,
                 "avg_up_per_day": 0, "avg_down_per_day": 0, "buckets": []}
